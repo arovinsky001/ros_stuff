@@ -100,13 +100,15 @@ class DataCollector:
         # current_state = self.current_state - self.base_state
         n_updates = self.n_updates
         current_states = []
-        while len(current_states) < 5:
+        while len(current_states) < 50:
             if self.n_updates == n_updates:
                 continue
             n_updates = self.n_updates
             current_states.append(self.current_state)
         
-        current_state = np.array(current_states).mean(axis=0).squeeze()
+        current_states = np.array(current_states)
+        import pdb;pdb.set_trace()
+        current_state = current_states.mean(axis=0).squeeze()
         theta = current_state[2]
         state = np.array([current_state[0], current_state[1], np.sin(theta), np.cos(theta)])
 
