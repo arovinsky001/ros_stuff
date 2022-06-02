@@ -1,31 +1,37 @@
 import argparse
+from cmath import nan
 import pickle as pkl
 from pdb import set_trace
 
 import numpy as np
 from matplotlib import pyplot as plt
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from sympy import Q
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch import tensor
+from torchcontrib.optim import SWA
 from tqdm import trange, tqdm
 from time import time
 
 from sim.scripts.generate_data import *
 
-# if torch.backends.mps.is_available:
-#     device = torch.device("mps")
-# else:
-#     device = torch.device("cpu")
-device = torch.device("cpu")
+pi = torch.pi
+
+def dcn(*args):
+    ret = []
+    for arg in args:
+        ret.append(arg.detach().cpu().numpy())
+    return ret if len(ret) > 1 else ret[0]
 
 def to_device(*args):
     ret = []
     for arg in args:
         ret.append(arg.to(device))
-    return ret
+    return ret if len(ret) > 1 else ret[0]
 
 def to_tensor(*args, requires_grad=True):
     ret = []
@@ -51,22 +57,31 @@ class DynamicsNetwork(nn.Module):
             nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, hidden_dim),
+            # nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.GELU(),
             nn.Linear(hidden_dim, state_dim),
         )
         self.model.apply(init_weights)
+
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
+        # self.optimizer = SWA(adam, swa_start=10, swa_freq=5, swa_lr=0.05)
+        # self.optimizer.param_groups = self.optimizer.optimizer.param_groups
+        # self.optimizer.state = self.optimizer.optimizer.state
+        # self.optimizer.defaults=self.optimizer.optimizer.defaults
+
         self.loss_fn = nn.MSELoss(reduction='none')
         self.delta = delta
         self.dist = (std > 0)
         self.std = torch.ones(state_dim).to(device) * std
+        self.input_scaler = None
+        self.output_scaler = None
 
     def forward(self, state, action):
         state, action = to_tensor(state, action)
         if len(state.shape) == 1:
-            state = state[:, None]
+            state = state[None, :]
         if len(action.shape) == 1:
-            action = action[:, None]
+            action = action[None, :]
 
         state_action = torch.cat([state, action], dim=-1).float()
         if self.dist:
@@ -79,32 +94,75 @@ class DynamicsNetwork(nn.Module):
         
 
     def update(self, state, action, next_state, retain_graph=False):
+        self.train()
         state, action, next_state = to_tensor(state, action, next_state)
         
         if self.dist:
             dist = self(state, action)
             prediction = dist.rsample()
             if self.delta:
+                # pred_next_state = state + prediction
                 losses = self.loss_fn(state + prediction, next_state)
             else:
+                # pred_next_state = prediction
                 losses = self.loss_fn(prediction, next_state)
         else:
             if self.delta:
                 state_delta = self(state, action)
+                # pred_next_state = state + state_delta
                 losses = self.loss_fn(state + state_delta, next_state)
             else:
                 pred_next_state = self(state, action)
                 losses = self.loss_fn(pred_next_state, next_state)
+        # losses[:, :2] *= 4
+        # angle = torch.atan2(next_state[:, 2], next_state[:, 3])
+        # pred_angle = torch.atan2(pred_next_state[:, 2], pred_next_state[:, 3])
+        # angle_diff = (angle - pred_angle) % (2 * pi)
+        # pos_err = (next_state - pred_next_state)[:, :2].norm(dim=-1)
+        # angle_err = torch.stack((angle_diff, 2 * pi - angle_diff)).min(dim=0)[0]
+        # losses = 100 * pos_err + angle_err
         loss = losses.mean()
 
         self.optimizer.zero_grad()
         loss.backward(retain_graph=retain_graph)
         self.optimizer.step()
-        return losses.detach()
+        return dcn(losses)
+
+    def set_scalers(self, states, actions, next_states):
+        with torch.no_grad():
+            self.input_scaler = StandardScaler().fit(np.append(states, actions, axis=-1))
+            self.output_scaler = StandardScaler().fit(next_states)
+    
+    def get_scaled(self, *args):
+        np_type = True
+        arglist = list(args)
+        for i, arg in enumerate(arglist):
+            if not isinstance(arg, np.ndarray):
+                np_type = False
+                arglist[i] = dcn(arg)
+        if len(arglist) == 2:
+            states, actions = arglist
+            if len(states.shape) == 1:
+                states = states[None, :]
+            if len(actions.shape) == 1:
+                actions = actions[None, :]
+            states_actions = np.append(states, actions, axis=-1)
+            states_actions_scaled = self.input_scaler.transform(states_actions)
+            states_scaled = states_actions_scaled[:, :states.shape[-1]]
+            actions_scaled = states_actions_scaled[:, states.shape[-1]:]
+            if not np_type:
+                states_scaled, actions_scaled = to_tensor(states_scaled, actions_scaled)
+            return states_scaled, actions_scaled
+        else:
+            next_states = arglist[0]
+            next_states_scaled = self.output_scaler.transform(next_states)
+            if not np_type:
+                next_states_scaled = to_tensor(next_states_scaled)
+            return next_states_scaled
 
 
 class MPCAgent:
-    def __init__(self, state_dim, action_dim, seed=1, hidden_dim=512, lr=7e-4, std=0.0, dropout=0.5, delta=True):
+    def __init__(self, state_dim, action_dim, seed=1, hidden_dim=512, lr=7e-4, std=0.0, dropout=0.5, delta=True, scale=True):
         self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, std=std, dropout=dropout, delta=delta)
         self.model.to(device)
         self.seed = seed
@@ -113,9 +171,11 @@ class MPCAgent:
         self.neighbors = []
         self.state = None
         self.delta = delta
+        self.scale = scale
         self.time = 0
 
     def mpc_action(self, state, init, goal, state_range, action_range, n_steps=10, n_samples=1000,
+<<<<<<< HEAD
                    swarm=False, swarm_weight=0.1, perp_weight=0.0, heading_weight=0.0, forward_weight=0.0, dist_weight=0.0):
         # actions_discrete = np.linspace(-0.6, 0.6, 9)
         actions_discrete = np.array([-0.6, -0.55, -0.5, -0.45, 0.45, 0.5, 0.55, 0.6])
@@ -129,30 +189,27 @@ class MPCAgent:
         all_actions = new_all_actions
         all_actions_shuffle = all_actions.copy()
         
+=======
+                   swarm=False, swarm_weight=0.1, perp_weight=0.0, angle_weight=0.0, forward_weight=0.0):
+>>>>>>> 9cb0c7b8e43d25f72d0d6d3ae3ce703fee23408a
         state, init, goal, state_range = to_tensor(state, init, goal, state_range)
         self.state = state
-        # all_actions = torch.empty(n_steps, n_samples, self.action_dim).uniform_(*action_range)
-        # states = torch.tile(state, (n_samples, 1))
-        # goals = torch.tile(goal, (n_samples, 1))
-        # states, all_actions, goals = to_tensor(states, all_actions, goals)
-        states = torch.tile(state, (len(all_actions), 1))
-        goals = torch.tile(goal, (len(all_actions), 1))
+        all_actions = torch.empty(n_steps, n_samples, self.action_dim).uniform_(*action_range)
+        states = torch.tile(state, (n_samples, 1))
+        goals = torch.tile(goal, (n_samples, 1))
         states, all_actions, goals = to_tensor(states, all_actions, goals)
-        x1, y1, _, _ = init
-        x2, y2, _, _ = goal
-        vec_to_goal = (goal - init)[:2]
+        x1, y1, _ = init
+        x2, y2, _ = goal
+        vec_to_goal = (goal - init)[:-1]
         optimal_dot = vec_to_goal / vec_to_goal.norm()
-        neg_x = torch.Tensor([-1, 0])
         perp_denom = vec_to_goal.norm()
-        # all_losses = torch.empty(n_steps, n_samples)
-        all_losses = torch.empty(n_steps, len(all_actions))
+        all_losses = torch.empty(n_steps, n_samples)
 
         for i in range(n_steps):
-            # actions = all_actions[i]
-            actions = all_actions_shuffle.copy()
-            np.random.shuffle(all_actions_shuffle)
+            actions = all_actions[i]
             with torch.no_grad():
                 states = self.get_prediction(states, actions)
+<<<<<<< HEAD
             states[:, 2:] = torch.clamp(states[:, 2:], -1., 1.)
 
             x0, y0, sin_t, cos_t = states.T
@@ -170,30 +227,55 @@ class MPCAgent:
             
             dist_loss = torch.norm((goals - states)[:, :2], dim=-1)
             perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom # / dist_loss.mean()
+=======
+            states = torch.clamp(states, *state_range)
+
+            x0, y0, _ = states.T
+            vecs_to_goal = (goals - states)[:, :-1]
+            actual_dot = vecs_to_goal.T / vecs_to_goal.norm(dim=-1)
+            
+            dist_loss = torch.norm((goals - states)[:, :-1], dim=-1)
+            perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom / dist_loss.mean()
+            angle_loss = torch.arccos(torch.clamp(optimal_dot @ actual_dot, -1., 1.))
+>>>>>>> 9cb0c7b8e43d25f72d0d6d3ae3ce703fee23408a
             forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T)
             swarm_loss = self.swarm_loss(states, goals) if swarm else 0
 
             perp_loss = perp_loss.reshape(dist_loss.shape)
             heading_loss = heading_loss.reshape(dist_loss.shape)
             forward_loss = forward_loss.reshape(dist_loss.shape)
+<<<<<<< HEAD
             print("perp:", perp_loss.min(), "|| forward:", forward_loss.min(), "|| angle:", heading_loss.min(),
                     "|| dist:", dist_loss.min())
 
             all_losses[i] = dist_weight * dist_loss + forward_weight * forward_loss + perp_weight * perp_loss \
                                 + heading_weight * heading_loss + swarm_weight * swarm_loss
+=======
+            print("perp:", perp_loss.mean(), "|| forward:", forward_loss.mean(), "|| dist:", dist_loss.mean())
+
+            all_losses[i] = dist_loss * 0 + forward_weight * forward_loss + perp_weight * perp_loss \
+                                + angle_weight * angle_loss + swarm_weight * swarm_loss
+>>>>>>> 9cb0c7b8e43d25f72d0d6d3ae3ce703fee23408a
         
-        best_idx = all_losses.sum(dim=0).argmin()
-        # best_idx = all_losses[-1].argmin()
+        # best_idx = all_losses.sum(dim=0).argmin()
+        best_idx = all_losses[-1].argmin()
         # import pdb;pdb.set_trace()
-        # return all_actions[0, best_idx]
-        return all_actions[best_idx]
+        return all_actions[0, best_idx]
     
+<<<<<<< HEAD
     def get_prediction(self, states, actions):
         states, actions = to_tensor(states, actions, requires_grad=False)
         states = (states - self.states_mean) / self.states_std
         actions = (actions - self.actions_mean) / self.actions_std
+=======
+    def get_prediction(self, states, actions, scale=True):
+        if self.scale and scale:
+            states, actions = self.model.get_scaled(states, actions)
+        states, actions = to_tensor(states, actions)
+>>>>>>> 9cb0c7b8e43d25f72d0d6d3ae3ce703fee23408a
         states, actions = to_device(states, actions)
-        model_output = self.model(states, actions)
+        with torch.no_grad():
+            model_output = self.model(states, actions)
         if self.model.dist:
             if self.delta:
                 states_delta = model_output.loc
@@ -206,9 +288,16 @@ class MPCAgent:
                 next_states = states_delta + states
             else:
                 next_states = model_output
+<<<<<<< HEAD
         next_states = next_states.detach().cpu()
         next_states = next_states * self.next_states_std + self.next_states_mean
         return to_tensor(next_states).float()
+=======
+        next_states = dcn(next_states)
+        if self.scale and scale:
+            next_states = self.model.output_scaler.inverse_transform(next_states)
+        return next_states
+>>>>>>> 9cb0c7b8e43d25f72d0d6d3ae3ce703fee23408a
 
     def swarm_loss(self, states, goals):
         neighbor_dists = torch.empty(len(self.neighbors), states.shape[0])
@@ -220,28 +309,36 @@ class MPCAgent:
         loss = neighbor_dists.mean(dim=0) * goal_term.mean()
         return loss
 
-    def train(self, states, actions, next_states, epochs=5, batch_size=256, correction_iters=0, n_tests=100):
+    def train(self, states, actions, next_states, epochs=5, batch_size=256):
+        if self.scale:
+            states, actions = self.model.get_scaled(states, actions)
+            next_states = self.model.get_scaled(next_states)
         states, actions, next_states = to_tensor(states, actions, next_states)
         train_states, test_states, train_actions, test_actions, train_next_states, test_next_states \
-            = train_test_split(states, actions, next_states, test_size=0.1, random_state=self.seed)
+            = train_test_split(states, actions, next_states, test_size=0.2, random_state=self.seed)
 
         training_losses = []
         test_losses = []
         test_idx = []
+        n_batches = np.ceil(len(train_states) / batch_size).astype("int")
         idx = np.arange(len(train_states))
 
-        n_batches = len(train_states) / batch_size
-        if int(n_batches) != n_batches:
-            n_batches += 1
-        n_batches = int(n_batches)
-        test_interval = epochs * n_batches // n_tests
-        test_interval = 1 if test_interval == 0 else test_interval
-
-        i = 0
-        for _ in tqdm(range(epochs), desc="Epoch", position=0, leave=False):
+        for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
             np.random.shuffle(idx)
             train_states, train_actions, train_next_states = train_states[idx], train_actions[idx], train_next_states[idx]
             
+            if i == -1:
+                self.model.eval()
+                with torch.no_grad():
+                    pred_next_states = to_tensor(self.get_prediction(test_states, test_actions))
+                test_loss = self.mse_loss(pred_next_states, test_next_states)
+                test_loss_mean = dcn(test_loss.mean())
+                training_losses.append(np.zeros(1))
+                test_losses.append(test_loss_mean)
+                test_idx.append(i)
+                tqdm.write(f"{i}: mean training loss: {nan} | mean test loss: {test_loss_mean}")
+                self.model.train()
+
             for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
                 batch_states = torch.autograd.Variable(train_states[j*batch_size:(j+1)*batch_size])
                 batch_actions = torch.autograd.Variable(train_actions[j*batch_size:(j+1)*batch_size])
@@ -251,39 +348,22 @@ class MPCAgent:
                 if type(training_loss) != float:
                     while len(training_loss.shape) > 1:
                         training_loss = training_loss.mean(axis=-1)
-
-                for _ in range(correction_iters):
-                    training_loss2 = self.correct(batch_states, batch_actions, batch_next_states, training_loss)
-
-                training_loss_mean = training_loss.mean().detach()
-                training_losses.append(training_loss_mean)
-                
-                if i % test_interval == 0:
-                    self.model.eval()
-                    with torch.no_grad():
-                        pred_next_states = self.get_prediction(test_states, test_actions)
-                    test_loss = self.mse_loss(pred_next_states, test_next_states)
-                    test_loss_mean = test_loss.mean().detach()
-                    test_losses.append(test_loss_mean)
-                    test_idx.append(i)
-                    tqdm.write(f"mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
-                    self.model.train()
-
-                i += 1
-
-        return training_losses, test_losses, test_idx
-
-    def correct(self, states, actions, next_states, loss):
-        batch_size = len(states)
-        worst_idx = torch.topk(loss.squeeze(), int(batch_size / 10))[1].detach().numpy()
-        worst_states, worst_actions, worst_next_states = states[worst_idx], actions[worst_idx], next_states[worst_idx]
-        loss = self.model.update(worst_states, worst_actions, worst_next_states)
         
-        if type(loss) != float:
-            while len(loss.shape) > 1:
-                loss = loss.sum(axis=-1)
-
-        return loss
+            training_loss_mean = training_loss.mean()
+            training_losses.append(training_loss_mean)
+            self.model.eval()
+            with torch.no_grad():
+                pred_next_states = to_tensor(self.get_prediction(test_states, test_actions))
+            test_loss = self.mse_loss(pred_next_states, test_next_states)
+            test_loss_mean = dcn(test_loss.mean())
+            test_losses.append(test_loss_mean)
+            test_idx.append(i)
+            tqdm.write(f"{i}: mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
+            self.model.train()
+        
+        # self.model.optimizer.swap_swa_sgd()    
+        self.model.eval()
+        return training_losses, test_losses, test_idx, test_states, test_actions, test_next_states
 
     def optimal_policy(self, state, goal, table, swarm=False, swarm_weight=0.3):
         if swarm:
@@ -293,7 +373,7 @@ class MPCAgent:
             for neighbor in self.neighbors:
                 neighbor_states = torch.tile(neighbor.state, (states.shape[0], 1))
                 distance = self.mse_loss(states, neighbor_states)
-                neighbor_dists.append(distance.detach().numpy())
+                neighbor_dists.append(dcn(distance))
             neighbor_dists = np.array(neighbor_dists)
             mean_dists = neighbor_dists.mean(axis=0)
             goals = np.tile(goal, (len(states), 1))
@@ -324,8 +404,6 @@ if __name__ == '__main__':
                         help='batch size for training new agent')
     parser.add_argument('-seed', type=int, default=1,
                         help='random seed for numpy and pytorch')
-    parser.add_argument('-correction_iters', type=int, default=0,
-                        help='number of times to retrain on mistaken data')
     parser.add_argument('-stochastic', action='store_true',
                         help='flag to use stochastic transition data')
     parser.add_argument('-std', type=float, default=0.0,
@@ -336,10 +414,22 @@ if __name__ == '__main__':
                         help='flag to use real data')
     parser.add_argument('-dropout', type=float, default=0.5,
                         help='dropout probability')
+    parser.add_argument('-generate_data', type=int, default=0,
+                        help='how many iterations of data generation to do')
+    parser.add_argument('-scale', action='store_true',
+                        help='flag to preprocess data with standard scaler')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    if args.hidden_dim > 1024:
+        if torch.backends.mps.is_available:
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device("cpu")
 
     if args.real:
         agent_path = 'agents/real.pkl'
@@ -354,23 +444,167 @@ if __name__ == '__main__':
     states = data['states']
     actions = data['actions']
     next_states = data['next_states']
-    
-    states = states[:-1]
-    actions = actions[:-1]
-    next_states = next_states[1:]
-    
-    theta = states[:, -1]
-    states = np.append(np.append(states[:, :-1], np.sin(theta)[:, None], axis=1), np.cos(theta)[:, None], axis=1)
-    theta = next_states[:, -1]
-    next_states = np.append(np.append(next_states[:, :-1], np.sin(theta)[:, None], axis=1), np.cos(theta)[:, None], axis=1)
 
-    if args.real:
-        bad_idx = np.linalg.norm(np.abs(states - next_states)[:, :2], axis=-1) > 0.1
-        bad_idx = np.logical_or(bad_idx, np.linalg.norm(np.abs(states - next_states)[:, :2], axis=-1) < 0.0005)
-        states = states[~bad_idx]
-        actions = actions[~bad_idx]
-        next_states = next_states[~bad_idx]
+    shift = 1
+    # actions = actions[shift:]
+    # states = states[:-shift]
+    # next_states = next_states[:-shift]
 
+    # actions = actions[:-shift]
+    # states = states[shift:]
+    # next_states = next_states[shift:]
+    # set_trace()
+
+    plotstart = 10
+    plotend = plotstart + 20
+
+    actions_plot = actions[plotstart:plotend]
+
+    states_x = states[plotstart:plotend, 0]
+    states_y = states[plotstart:plotend, 1]
+    next_states_x = next_states[plotstart:plotend, 0]
+    next_states_y = next_states[plotstart:plotend, 1]
+
+    states_sin = states[plotstart:plotend, 2]
+    states_cos = states[plotstart:plotend, 3]
+    next_states_sin = next_states[plotstart:plotend, 2]
+    next_states_cos = next_states[plotstart:plotend, 3]
+    states_theta = np.arctan2(states_sin, states_cos)
+    states_theta += pi
+    states_sin = np.sin(states_theta)
+    states_cos = np.cos(states_theta)
+    next_states_theta = np.arctan2(next_states_sin, next_states_cos)
+    next_states_theta += pi
+    next_states_sin = np.sin(next_states_theta)
+    next_states_cos = np.cos(next_states_theta)
+    # next_states_theta = np.arctan2(next_states_sin, next_states_cos)
+
+    plt.quiver(states_x[1:], states_y[1:], -states_cos[1:], -states_sin[1:], color="green")
+    plt.quiver(next_states_x[:-1], next_states_y[:-1], -next_states_cos[:-1], -next_states_sin[:-1], color="purple")
+    plt.plot(states_x[1:], states_y[1:], color="green", linewidth=1.0)
+    plt.plot(next_states_x[:-1], next_states_y[:-1], color="purple", linewidth=1.0)
+    for i, (x, y) in enumerate(zip(states_x, states_y)):
+        if i == 0:
+            continue
+        plt.annotate(f"{i-1}", # this is the text
+                    (x,y), # these are the coordinates to position the label
+                    textcoords="offset points", # how to position the text
+                    xytext=(0,10), # distance from text to points (x,y)
+                    ha='center') # horizontal alignment can be left, right or center
+        
+        plt.annotate(str(actions_plot[i]), # this is the text
+                    (x,y), # these are the coordinates to position the label
+                    textcoords="offset points", # how to position the text
+                    xytext=(-10,-10), # distance from text to points (x,y)
+                    ha='center') # horizontal alignment can be left, right or center
+
+    for i, (x, y) in enumerate(zip(next_states_x, next_states_y)):
+        if i == len(next_states_x) - 1:
+            continue
+        label = f"{i}"
+        plt.annotate(label, # this is the text
+                    (x,y), # these are the coordinates to position the label
+                    textcoords="offset points", # how to position the text
+                    xytext=(0,10), # distance from text to points (x,y)
+                    ha='center') # horizontal alignment can be left, right or center
+
+    plt.show()
+
+    # n_actions = 3
+    # length = len(actions) - n_actions + 1
+    # new_actions = actions
+    # for i in range(n_actions):
+    #     new_actions = np.append(new_actions[:-1], actions[i+1:], axis=-1)
+    # actions = new_actions
+    # states = states[n_actions:]
+    # next_states = next_states[n_actions:]
+    
+    # length = len(states) if len(states) % n_actions == 0 else len(states) - (len(states) % n_actions)
+    # states = states[:length:n_actions]
+    # actions = actions[:length].reshape(-1, actions.shape[-1] * n_actions)
+    # next_states = next_states[:length:n_actions]
+
+    new_states = states.copy()
+    new_actions = actions.copy()
+    new_next_states = next_states.copy()
+
+    for _ in range(args.generate_data):
+        state_shift = np.random.uniform(low=-1.0, high=1.0, size=(len(states), 2))
+        shifted_states = states[:, :2] + state_shift
+        shifted_next_states = next_states[:, :2] + state_shift
+
+        shifted_states = np.append(shifted_states, states[:, 2:], axis=1)
+        shifted_next_states = np.append(shifted_next_states, next_states[:, 2:], axis=1)
+
+        new_states = np.append(new_states, shifted_states, axis=0)
+        new_actions = np.append(new_actions, actions, axis=0)
+        new_next_states = np.append(new_next_states, shifted_next_states, axis=0)
+        
+    states = new_states
+    actions = new_actions
+    next_states = new_next_states
+
+    # normalize = True
+    # if normalize:
+    #     states_mean = states.mean(axis=0)
+    #     states_std = states.std(axis=0)
+    #     actions_mean = actions.mean(axis=0)
+    #     actions_std = actions.std(axis=0)
+    #     next_states_mean = next_states.mean(axis=0)
+    #     next_states_std = next_states.std(axis=0)
+
+    #     states = (states - states.mean(axis=0)) / states.std(axis=0)
+    #     actions = (actions - actions.mean(axis=0)) / actions.std(axis=0)
+    #     next_states = (next_states - next_states.mean(axis=0)) / next_states.std(axis=0)
+
+    # next_states_min = next_states.min(axis=0)
+    # next_states_max = next_states.max(axis=0) - next_states_min
+
+    # states -= states.min(axis=0)
+    # actions -= actions.min(axis=0)
+    # next_states -= next_states.min(axis=0)
+
+    # states /= states.max(axis=0)
+    # actions /= actions.max(axis=0)
+    # next_states /= next_states.max(axis=0)
+    np.set_printoptions(suppress=True)
+
+    # idx = np.argwhere(np.all(abs(actions) <= 0.4, axis=-1)).squeeze()
+    # zero_diff = abs(states[idx] - next_states[idx])
+    # bad_idx = np.argwhere(np.linalg.norm(zero_diff, axis=-1) > zero_diff.mean()).squeeze()
+
+    # states = np.delete(states, bad_idx, axis=0)
+    # actions = np.delete(actions, bad_idx, axis=0)
+    # next_states = np.delete(next_states, bad_idx, axis=0)
+
+    # diff_idx = np.argwhere(actions[:, 0] * actions[:, 1] < 0).squeeze()
+    # same_idx = np.argwhere(actions[:, 0] * actions[:, 1] > 0).squeeze()
+    # np.linalg.norm((states - next_states)[diff_idx, :2], axis=-1).mean()
+    # np.linalg.norm((states - next_states)[same_idx, :2], axis=-1).mean()
+
+    # bad_idx1 = np.argwhere(np.linalg.norm((states - next_states)[diff_idx, :2], axis=-1) > 0.02)
+    # bad_idx2 = np.argwhere(np.linalg.norm((states - next_states)[same_idx, :2], axis=-1) < 0.05)
+    # bad_idx = np.unique(np.append(bad_idx1, bad_idx2, axis=0))
+    # set_trace()
+    # states = np.delete(states, bad_idx, axis=0)
+    # actions = np.delete(actions, bad_idx, axis=0)
+    # next_states = np.delete(next_states, bad_idx, axis=0)
+
+    # idx = np.argwhere(np.all(actions > 0, axis=-1)).squeeze()
+    # states = states[idx]
+    # actions = actions[idx]
+    # next_states = next_states[idx]
+    # import pdb;pdb.set_trace()
+
+    # if args.real:
+    #     bad_idx1 = np.linalg.norm((states - next_states)[:, :2], axis=-1) > 0.2
+    #     bad_idx2 = np.linalg.norm((states - next_states)[:, :2], axis=-1) < 0.005
+    #     bad_idx = bad_idx1 | bad_idx2
+    #     set_trace()
+    #     states = states[~bad_idx]
+    #     actions = actions[~bad_idx]
+    #     next_states = next_states[~bad_idx]
+    
     print('\nDATA LOADED\n')
 
     if not args.real:
@@ -386,26 +620,37 @@ if __name__ == '__main__':
             agent_path += "_stochastic"
         if args.delta:
             agent_path += "_delta"
-        if args.correction_iters > 0:
-            agent_path += f"_correction{args.correction_iters}"
         agent_path += ".pkl"
 
     if args.new_agent:
         agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed, std=args.std,
-                         delta=args.delta, hidden_dim=args.hidden_dim, lr=args.learning_rate,
-                         dropout=args.dropout)
+                         delta=args.delta, scale=args.scale, hidden_dim=args.hidden_dim,
+                         lr=args.learning_rate, dropout=args.dropout)
+        
+        if args.scale:
+            agent.model.set_scalers(states, actions, next_states)
+        
+        # if normalize:
+        #     agent.states_mean = states_mean
+        #     agent.states_std = states_std
+        #     agent.actions_mean = actions_mean
+        #     agent.actions_std = actions_std
+        #     agent.next_states_mean = next_states_mean
+        #     agent.next_states_std = next_states_std
 
-        training_losses, test_losses, test_idx = agent.train(
+        training_losses, test_losses, test_idx, test_states, test_actions, test_next_states = agent.train(
                         states, actions, next_states,
-                        epochs=args.epochs, batch_size=args.batch_size,
-                        correction_iters=args.correction_iters, n_tests=100)
+                        epochs=args.epochs, batch_size=args.batch_size)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
+        ignore = 20
+        print("\nMIN TEST LOSS EPOCH:", test_losses[ignore:].argmin() + ignore)
+        print("MIN TEST LOSS:", test_losses[ignore:].min())
         plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
         plt.plot(test_idx, test_losses, label="Test Loss")
         plt.yscale('log')
-        plt.xlabel('Batch')
+        plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Dynamics Model Loss')
         plt.legend()
@@ -420,17 +665,83 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
+    # np.where((np.all(abs(actions) > 0.7, axis=1) & (actions[:, 0] * actions[:, 1] > 0)))[0]
+    # agent.get_prediction(np.array([[-0.5, -0.5, 0.0, 1.0]]), np.array([[0.8, 0.8]]))
+
+    # 50 epochs, normalized, no action thing, dropout 0.5
+    # ERROR MEAN: tensor([0.0236, 0.0250, 0.3964, 0.3574], dtype=torch.float64)
+    # ERROR STD: tensor([0.0209, 0.0204, 0.3397, 0.2594], dtype=torch.float64)
+    # ERROR MAX: tensor([0.0889, 0.0935, 1.4369, 1.1629], dtype=torch.float64)
+    # ERROR MIN: tensor([2.4030e-06, 4.3542e-04, 7.1151e-03, 6.9733e-03], dtype=torch.float64)
+
     agent.model.eval()
+    test_states, test_actions, test_next_states = \
+        dcn(test_states, test_actions, test_next_states)
     diffs = []
-    for i in range(len(states)):
-        pred = agent.get_prediction(states[None, i], actions[None, i]).detach()
-        diffs.append(abs(pred - next_states[i]))
-    diff = torch.stack(diffs).squeeze()
-    print("MEAN:", diff.mean(axis=0))
-    print("STD:", diff.std(axis=0))
-    print("MAX:", diff.max(axis=0)[0])
-    print("MIN:", diff.min(axis=0)[0])
+    pred_next_states = agent.get_prediction(test_states, test_actions, scale=False)
+
+    # if normalize:
+    #     pred_next_states = pred_next_states * next_states_std + next_states_mean
+    #     test_states = test_states.detach() * states_std + states_mean
+    #     test_next_states = test_next_states.detach() * next_states_std + next_states_mean
+
+    if args.scale:
+        pred_next_states = agent.model.output_scaler.inverse_transform(pred_next_states)
+        test_next_states = agent.model.output_scaler.inverse_transform(test_next_states)
+    
+    error = (pred_next_states - test_next_states) ** 2
+    print("\nERROR MEAN:", error.mean(axis=0))
+    print("ERROR STD:", error.std(axis=0))
+    print("ERROR MAX:", error.max(axis=0)[0])
+    print("ERROR MIN:", error.min(axis=0)[0])
+
+    # diffs = abs(test_states - test_next_states)
+    diffs = (states - next_states) ** 2
+    print("\nACTUAL MEAN:", diffs.mean(axis=0))
+    print("ACTUAL STD:", diffs.std(axis=0))
+    # set_trace()
+
+    state = states[0]
+    slist = []
+    alist = []
+    l = 10
+    for i in range(l):
+        action = actions[i]
+        slist.append(state.squeeze())
+        alist.append(action.squeeze())
+        state = agent.get_prediction(state, action)
+
+    slist = np.array(slist)
+    alist = np.array(alist)
+    
     set_trace()
+    plt.quiver(slist[:, 0], slist[:, 1], -slist[:, 2], -slist[:, 3], color="green")
+    plt.quiver(states[:l, 0], states[:l, 1], -states[:l, 2], -states[:l, 3], color="purple")
+    plt.plot(slist[:, 0], slist[:, 1], color="green", linewidth=1.0)
+    plt.plot(states[:l, 0], states[:l, 1], color="purple", linewidth=1.0)
+
+    for i, (x, y) in enumerate(zip(slist[:, 0], slist[:, 1])):
+        plt.annotate(f"{i}", # this is the text
+                    (x,y), # these are the coordinates to position the label
+                    textcoords="offset points", # how to position the text
+                    xytext=(0,10), # distance from text to points (x,y)
+                    ha='center') # horizontal alignment can be left, right or center
+        
+        # plt.annotate(str(actions_plot[i]), # this is the text
+        #             (x,y), # these are the coordinates to position the label
+        #             textcoords="offset points", # how to position the text
+        #             xytext=(-10,-10), # distance from text to points (x,y)
+        #             ha='center') # horizontal alignment can be left, right or center
+
+    for i, (x, y) in enumerate(zip(states[:l, 0], states[:l, 1])):
+        label = f"{i}"
+        plt.annotate(label, # this is the text
+                    (x,y), # these are the coordinates to position the label
+                    textcoords="offset points", # how to position the text
+                    xytext=(0,10), # distance from text to points (x,y)
+                    ha='center') # horizontal alignment can be left, right or center
+
+    plt.show()
     
     state_range = np.array([MIN_STATE, MAX_STATE])
     action_range = np.array([MIN_ACTION, MAX_ACTION])
