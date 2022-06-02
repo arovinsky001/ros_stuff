@@ -2,6 +2,8 @@
 
 import os
 import numpy as np
+from matplotlib import animation
+
 from ar_track_alvar_msgs.msg import AlvarMarkers
 from ros_stuff.srv import CommandAction
 from ros_stuff.msg import RobotCmd
@@ -15,26 +17,20 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.np
 
 class DataCollector:
     def __init__(self):
-        action = 0.9
-        actions_discrete = np.array([-0.6, -0.55, -0.5, -0.45, 0.45, 0.5, 0.55, 0.6])
-        xa, ya = np.meshgrid(actions_discrete, actions_discrete)
-        # self.actions_table = np.stack((xa, ya)).transpose(1, 2, 0).reshape(-1, 2)
-        self.actions_table = np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]) * 0.95
-
-        self.min_action = -action
-        self.max_action = action
+        self.prev_actions = []
+        self.n_avg_states = 2
+        self.n_wait_updates = 3
+        self.action_range = [-1.0, 1.0]
         self.current_state = np.zeros(3)        # (x, y, theta)
-        # self.base_state = np.zeros(3)
-        self.robot_id = 2
-        # self.base_id = 1
+        self.robot_id = 0
         self.states = []
         self.actions = []
         self.next_states = []
         self.step_count = 0
         self.found_count = 0
         self.n_updates = 0
+        self.perturb_count = 0
         rospy.init_node("data_collector")
-        self.time = rospy.get_rostime().to_sec()
         print("waiting for service")
         rospy.wait_for_service("/kami1/server")
         self.command_action = rospy.ServiceProxy("/kami1/server", CommandAction)
@@ -46,42 +42,92 @@ class DataCollector:
     def update_state(self, msg):
         try:
             found_robot = False
-            # found_base = False
             for marker in msg.markers:
                 if marker.id == self.robot_id:
                     state = self.current_state
                     found_robot = True
-                # elif marker.id == self.base_id:
-                #     state = self.base_state
-                #     found_base = True
                 else:
                     continue
                 
-                state[0] = marker.pose.pose.position.x
-                state[1] = marker.pose.pose.position.y
-                
                 o = marker.pose.pose.orientation
                 o_list = [o.x, o.y, o.z, o.w]
-                _, _, z = euler_from_quaternion(o_list)
+                x, y, z = euler_from_quaternion(o_list)
+
+                if abs(np.sin(x)) > 0.6 or abs(np.cos(x)) > 0.6:
+                    self.found_count += 1
+                    return
+
+                state[0] = marker.pose.pose.position.x
+                state[1] = marker.pose.pose.position.y
                 state[2] = z % (2 * np.pi)
             
-            # if not found_robot and found_base:
             if not found_robot:
                 self.found_count += 1
             else:
                 self.found_count = 0
+                self.n_updates += 1
         except:
             print("could not update states")
             import pdb;pdb.set_trace()
-        self.n_updates += 1
         
     def collect_data(self):
-        if self.found_count >= 20:
+        if self.n_updates == 0:
+            return
+
+        if len(self.prev_actions) == 0:
+            self.prev_actions.append(self.get_command_action())
+            self.prev_actions.append(self.get_command_action())
+            return
+
+        if not self.check_found_perturb():
+            return
+
+        state = self.get_state()
+        action = self.get_command_action()
+
+        if not self.check_found_perturb():
+            return
+
+        next_state = self.get_state()
+
+        print(f"\nstate:, {self.current_state}")
+        print(f"action: {action}")
+
+        actions3 = np.block([self.prev_actions[0], self.prev_actions[1], action])
+        self.prev_actions[0] = self.prev_actions[1]
+        self.prev_actions[1] = action
+        
+        self.states.append(state)
+        self.actions.append(actions3)
+        self.next_states.append(next_state)
+        self.step_count += 1
+        
+        if self.step_count % 5 == 0:
+            self.save_data()
+    
+    def get_state(self):
+        current_states = []
+        n_updates = self.n_updates
+        while len(current_states) < self.n_avg_states:
+            if self.n_updates == n_updates:
+                continue
+                print("continuing")
+            n_updates = self.n_updates
+            current_states.append(self.current_state.copy())
+        
+        current_states = np.array(current_states)
+        current_state = current_states.mean(axis=0).squeeze()
+        theta = current_state[2]
+        state = np.array([current_state[0], current_state[1], np.sin(theta), np.cos(theta)])
+        return state
+
+    def check_found_perturb(self):
+        if self.perturb_count >= 5:
             print("\n\nRobot hit boundary!\n\n")
             self.save_data(clip_end=True)
             rospy.signal_shutdown("bye")
-            return
-        
+            return False
+
         if self.found_count > 0:
             action_req = RobotCmd()
             action_req.left_pwm = 0.9
@@ -89,74 +135,22 @@ class DataCollector:
             self.command_action(action_req, 'kami1')
             print("PERTURBING")
             rospy.sleep(0.05)
-            return
-        
-        if self.n_updates == 0:
-            return
+            self.perturb_count += 1
+            return False
 
-        if self.step_count % len(self.actions_table) == 0:
-            np.random.shuffle(self.actions_table)
-        
-        # current_state = self.current_state - self.base_state
-        n_updates = self.n_updates
-        current_states = []
-        while len(current_states) < 50:
-            if self.n_updates == n_updates:
-                continue
-            n_updates = self.n_updates
-            current_states.append(self.current_state)
-        
-        current_states = np.array(current_states)
-        import pdb;pdb.set_trace()
-        current_state = current_states.mean(axis=0).squeeze()
-        theta = current_state[2]
-        state = np.array([current_state[0], current_state[1], np.sin(theta), np.cos(theta)])
-
-        # action = np.random.uniform(low=self.min_action, high=self.max_action, size=2)
-        # min_magnitude = 0.4
-        # if not np.any(np.abs(action) > min_magnitude):
-        #     action[action.argmax()] = min_magnitude * np.sign(action[action.argmax()])
-        
-        action = self.actions_table[self.step_count % len(self.actions_table)]
-
-        # if rospy.get_rostime().to_sec() - self.time > 1.0:
-        #     self.time = rospy.get_rostime().to_sec()
-        print(f"\nstate:, {current_state}")
-        print(f"action: {action}")
-
+        self.perturb_count = 0
+        return True
+    
+    def get_command_action(self):
+        action = np.random.uniform(*action_range, size=2)
         action_req = RobotCmd()
         action_req.left_pwm = action[0]
         action_req.right_pwm = action[1]
-
         self.command_action(action_req, 'kami1')      
-        rospy.sleep(0.1)
         n_updates = self.n_updates
-        
-        while self.n_updates - n_updates < 5:
-            rospy.sleep(0.001)
-
-        if self.found_count > 0:
-            return
-        
-        n_updates = self.n_updates
-        next_states = []
-        while len(next_states) < 5:
-            if self.n_updates == n_updates:
-                continue
-            n_updates = self.n_updates
-            next_states.append(self.current_state)
-        
-        next_state = np.array(next_states).mean(axis=0).squeeze()
-        theta = next_state[2]
-        next_state = np.array([next_state[0], next_state[1], np.sin(theta), np.cos(theta)])
-
-        self.states.append(state)
-        self.actions.append(action)
-        self.next_states.append(next_state)
-        self.step_count += 1
-        
-        if self.step_count % 10 == 0:
-            self.save_data()
+        while self.n_updates - n_updates < self.n_wait_updates:
+            rospy.sleep(0.01)
+        return action
     
     def save_data(self, clip_end=False):
         states = np.array(self.states)
@@ -187,6 +181,7 @@ class DataCollector:
                 old_states = np.copy(data["states"])
                 old_actions = np.copy(data["actions"])
                 old_next_states = np.copy(data["next_states"])
+                import pdb;pdb.set_trace()
                 if len(old_states) != 0 and len(old_actions) != 0:
                     states = np.append(old_states, states, axis=0)
                     actions = np.append(old_actions, actions, axis=0)
@@ -204,6 +199,10 @@ def load_and_process():
     states = np.array(data['states'])
     actions = np.array(data['actions'])
     next_states = np.array(data['next_states'])
+    # states = states[:-30]
+    # actions = actions[:-30]
+    # next_states = next_states[:-30]
+    # np.savez_compressed(RAW_SAVE_PATH, states=states, actions=actions, next_states=next_states)
     length = min(len(states), len(actions), len(next_states))
     states = states[:length]
     actions = actions[:length]
