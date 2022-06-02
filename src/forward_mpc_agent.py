@@ -27,11 +27,11 @@ def to_device(*args):
         ret.append(arg.to(device))
     return ret
 
-def to_tensor(*args):
+def to_tensor(*args, requires_grad=True):
     ret = []
     for arg in args:
         if type(arg) == np.ndarray:
-            ret.append(tensor(arg.astype('float32'), requires_grad=True))
+            ret.append(tensor(arg.astype('float32'), requires_grad=requires_grad))
         else:
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
@@ -116,14 +116,17 @@ class MPCAgent:
         self.time = 0
 
     def mpc_action(self, state, init, goal, state_range, action_range, n_steps=10, n_samples=1000,
-                   swarm=False, swarm_weight=0.1, perp_weight=0.0, angle_weight=0.0, forward_weight=0.0, dist_weight=0.0):
+                   swarm=False, swarm_weight=0.1, perp_weight=0.0, heading_weight=0.0, forward_weight=0.0, dist_weight=0.0):
         # actions_discrete = np.linspace(-0.6, 0.6, 9)
         actions_discrete = np.array([-0.6, -0.55, -0.5, -0.45, 0.45, 0.5, 0.55, 0.6])
         xa, ya = np.meshgrid(actions_discrete, actions_discrete)
         all_actions = np.stack((xa, ya)).transpose(1, 2, 0).reshape(-1, 2)
         # all_actions_shuffle = all_actions.copy()
-        all_actions = np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]) * 0.95
-        all_actions = np.append(all_actions, all_actions, axis=0)
+        all_actions = np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]) * 0.8
+        new_all_actions = all_actions
+        while len(new_all_actions) < n_samples:
+            new_all_actions = np.append(new_all_actions, all_actions, axis=0)
+        all_actions = new_all_actions
         all_actions_shuffle = all_actions.copy()
         
         state, init, goal, state_range = to_tensor(state, init, goal, state_range)
@@ -150,7 +153,6 @@ class MPCAgent:
             np.random.shuffle(all_actions_shuffle)
             with torch.no_grad():
                 states = self.get_prediction(states, actions)
-            # states = torch.clamp(states, *state_range)
             states[:, 2:] = torch.clamp(states[:, 2:], -1., 1.)
 
             x0, y0, sin_t, cos_t = states.T
@@ -158,32 +160,27 @@ class MPCAgent:
             actual_dot = (vecs_to_goal.T / vecs_to_goal.norm(dim=-1)).T
             target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
             target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
-            # target_angle = torch.arccos(torch.clamp(actual_dot @ neg_x, -1., 1.))
             current_angle = torch.atan2(sin_t, cos_t)
-            # current_angle = (torch.arcsin(sin_t) + torch.arccos(cos_t)) / 2
             angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
             angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
             angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
             angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
-            angle_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0]
+            heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0]
             # import pdb;pdb.set_trace()
             
             dist_loss = torch.norm((goals - states)[:, :2], dim=-1)
             perp_loss = torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom # / dist_loss.mean()
-            # angle_loss = torch.arccos(torch.clamp(optimal_dot @ actual_dot, -1., 1.))
             forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T)
             swarm_loss = self.swarm_loss(states, goals) if swarm else 0
 
             perp_loss = perp_loss.reshape(dist_loss.shape)
-            angle_loss = angle_loss.reshape(dist_loss.shape)
+            heading_loss = heading_loss.reshape(dist_loss.shape)
             forward_loss = forward_loss.reshape(dist_loss.shape)
-            if torch.any(torch.isnan(angle_loss.mean())):
-                import pdb;pdb.set_trace()
-            print("perp:", perp_loss.min(), "|| forward:", forward_loss.min(), "|| angle:", angle_loss.min(),
+            print("perp:", perp_loss.min(), "|| forward:", forward_loss.min(), "|| angle:", heading_loss.min(),
                     "|| dist:", dist_loss.min())
 
             all_losses[i] = dist_weight * dist_loss + forward_weight * forward_loss + perp_weight * perp_loss \
-                                + angle_weight * angle_loss + swarm_weight * swarm_loss
+                                + heading_weight * heading_loss + swarm_weight * swarm_loss
         
         best_idx = all_losses.sum(dim=0).argmin()
         # best_idx = all_losses[-1].argmin()
@@ -192,7 +189,9 @@ class MPCAgent:
         return all_actions[best_idx]
     
     def get_prediction(self, states, actions):
-        states, actions = to_tensor(states, actions)
+        states, actions = to_tensor(states, actions, requires_grad=False)
+        states = (states - self.states_mean) / self.states_std
+        actions = (actions - self.actions_mean) / self.actions_std
         states, actions = to_device(states, actions)
         model_output = self.model(states, actions)
         if self.model.dist:
@@ -208,6 +207,7 @@ class MPCAgent:
             else:
                 next_states = model_output
         next_states = next_states.detach().cpu()
+        next_states = next_states * self.next_states_std + self.next_states_mean
         return to_tensor(next_states).float()
 
     def swarm_loss(self, states, goals):
