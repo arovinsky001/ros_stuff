@@ -42,13 +42,8 @@ def to_tensor(*args, requires_grad=True):
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
 
-def init_weights(m):
-    if isinstance(m, nn.Linear):
-        torch.nn.init.xavier_uniform_(m.weight)
-        m.bias.data.fill_(0.01)
-
 class DynamicsNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=512, lr=1e-3, std=0.05, dropout=0.5, delta=False):
+    def __init__(self, state_dim, action_dim, hidden_dim=256, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True, delta=True):
         super(DynamicsNetwork, self).__init__()
         input_dim = state_dim + action_dim
         self.model = nn.Sequential(
@@ -56,20 +51,35 @@ class DynamicsNetwork(nn.Module):
             nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.GELU(),
             nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, hidden_dim),
+            # nn.Linear(hidden_dim, hidden_dim),
+            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
             # nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.GELU(),
-            nn.Linear(hidden_dim, state_dim),
-        )
-        self.model.apply(init_weights)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+            # nn.Dropout(p=dropout),
+            # nn.Linear(hidden_dim, hidden_dim),
+            # nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            # nn.GELU(),
+
+            nn.Linear(hidden_dim, state_dim * 2 if dist else state_dim),
+            # nn.Linear(hidden_dim, state_dim),
+        )
+        # self.model.apply(init_weights)
+
+        self.state_dim = state_dim
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True)
         self.loss_fn = nn.MSELoss(reduction='none')
         self.delta = delta
-        self.dist = (std > 0)
-        self.std = torch.ones(state_dim).to(device) * std
+        self.dist = dist
+        self.entropy_weight = entropy_weight
         self.input_scaler = None
         self.output_scaler = None
+        self._init_weights()
+
+    def _init_weights(self):
+        if isinstance(self.model, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            self.model.bias.data.fill_(0.01)
 
     def forward(self, state, action):
         state, action = to_tensor(state, action)
@@ -80,8 +90,10 @@ class DynamicsNetwork(nn.Module):
 
         state_action = torch.cat([state, action], dim=-1).float()
         if self.dist:
-            mean = self.model(state_action)
-            std = self.std
+            mean_std = self.model(state_action)
+            mean = mean_std[:, :self.state_dim]
+            std = mean_std[:, self.state_dim:]
+            std = torch.clamp(std, min=1e-6)
             return torch.distributions.normal.Normal(mean, std)
         else:
             pred = self.model(state_action)
@@ -99,6 +111,7 @@ class DynamicsNetwork(nn.Module):
                 losses = self.loss_fn(state + prediction, next_state)
             else:
                 losses = self.loss_fn(prediction, next_state)
+            losses -= dist.entropy() * self.entropy_weight
         else:
             if self.delta:
                 state_delta = self(state, action)
@@ -150,8 +163,8 @@ class DynamicsNetwork(nn.Module):
 
 
 class MPCAgent:
-    def __init__(self, state_dim, action_dim, seed=1, hidden_dim=512, lr=7e-4, std=0.0, dropout=0.5, delta=True, scale=True):
-        self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, std=std, dropout=dropout, delta=delta)
+    def __init__(self, state_dim, action_dim, seed=1, hidden_dim=512, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, delta=True, scale=True):
+        self.model = DynamicsNetwork(state_dim, action_dim, hidden_dim=hidden_dim, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist, delta=delta)
         self.model.to(device)
         self.seed = seed
         self.action_dim = action_dim
@@ -259,25 +272,22 @@ class MPCAgent:
 
         training_losses = []
         test_losses = []
-        test_idx = []
+        test_idx = [-1]
         n_batches = np.ceil(len(train_states) / batch_size).astype("int")
         idx = np.arange(len(train_states))
 
+        self.model.eval()
+        with torch.no_grad():
+            pred_next_states = to_tensor(self.get_prediction(test_states, test_actions))
+        test_loss = self.mse_loss(pred_next_states, test_next_states)
+        test_loss_mean = dcn(test_loss.mean())
+        test_losses.append(test_loss_mean)
+        tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
+        self.model.train()
+
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
             np.random.shuffle(idx)
-            train_states, train_actions, train_next_states = train_states[idx], train_actions[idx], train_next_states[idx]
-            
-            if i == -1:
-                self.model.eval()
-                with torch.no_grad():
-                    pred_next_states = to_tensor(self.get_prediction(test_states, test_actions))
-                test_loss = self.mse_loss(pred_next_states, test_next_states)
-                test_loss_mean = dcn(test_loss.mean())
-                test_losses.append(test_loss_mean)
-                test_idx.append(i)
-                tqdm.write(f"{i}: mean training loss: {nan} | mean test loss: {test_loss_mean}")
-                self.model.train()
-                continue
+            train_states, train_actions, train_next_states = train_states[idx], train_actions[idx], train_next_states[idx]                
 
             for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
                 batch_states = torch.autograd.Variable(train_states[j*batch_size:(j+1)*batch_size])
@@ -298,7 +308,7 @@ class MPCAgent:
             test_loss_mean = dcn(test_loss.mean())
             test_losses.append(test_loss_mean)
             test_idx.append(i)
-            tqdm.write(f"{i}: mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
+            tqdm.write(f"{i+1}: mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
             self.model.train()
         
         self.model.eval()
@@ -345,8 +355,8 @@ if __name__ == '__main__':
                         help='random seed for numpy and pytorch')
     parser.add_argument('-stochastic', action='store_true',
                         help='flag to use stochastic transition data')
-    parser.add_argument('-std', type=float, default=0.0,
-                        help='standard deviation for model distribution')
+    parser.add_argument('-dist', action='store_true',
+                        help='flag to have the model output a distribution')
     parser.add_argument('-delta', action='store_true',
                         help='flag to output state delta')
     parser.add_argument('-real', action='store_true',
@@ -359,6 +369,10 @@ if __name__ == '__main__':
                         help='flag to preprocess data with standard scaler')
     parser.add_argument('-save', action='store_true',
                         help='flag to save model after training')
+    parser.add_argument('-retrain', action='store_true',
+                        help='flag to load existing model and continue training')
+    parser.add_argument('-entropy', type=float, default=0.02,
+                        help='weight for entropy term in training loss function')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -387,6 +401,27 @@ if __name__ == '__main__':
     states = data['states']
     actions = data['actions']
     next_states = data['next_states']
+
+    if args.retrain:
+        online_data = np.load("sim/data/real_data_online.npz")
+    
+        online_states = online_data['states']
+        online_actions = online_data['actions']
+        online_next_states = online_data['next_states']
+
+        n_repeat = int(len(states) / len(online_states))
+        n_repeat = 1 if n_repeat == 0 else n_repeat
+        online_states = np.tile(online_states, (n_repeat, 1))
+        online_actions = np.tile(online_actions, (n_repeat, 1))
+        online_next_states = np.tile(online_next_states, (n_repeat, 1))
+
+        states = np.append(states, online_states, axis=0)
+        actions = np.append(actions, online_actions, axis=0)
+        next_states = np.append(next_states, online_next_states, axis=0)
+
+        states = online_states
+        actions = online_actions
+        next_states = online_next_states
 
     plot_data = False
     if plot_data:
@@ -447,20 +482,23 @@ if __name__ == '__main__':
     train_states, test_states, train_actions, test_actions, train_next_states, test_next_states \
             = train_test_split(states, actions, next_states, test_size=0.1, random_state=args.seed)
 
+    # generate artificial training data
     new_states = train_states.copy()
     new_actions = train_actions.copy()
     new_next_states = train_next_states.copy()
 
     for _ in range(args.generate_data):
-        state_shift = np.random.uniform(low=-1.0, high=1.0, size=(len(states), 2))
-        shifted_states = states[:, :2] + state_shift
-        shifted_next_states = next_states[:, :2] + state_shift
+        state_shift = np.random.uniform(low=-0.8, high=0.8, size=(len(train_states), 2))
+        state_noise = np.random.normal(0.0, 0.001, size=train_states.shape)
+        next_state_noise = np.random.normal(0.0, 0.001, size=train_next_states.shape)
 
-        shifted_states = np.append(shifted_states, states[:, 2:], axis=1)
-        shifted_next_states = np.append(shifted_next_states, next_states[:, 2:], axis=1)
+        shifted_states = train_states[:, :2] + state_shift
+        shifted_next_states = train_next_states[:, :2] + state_shift
+        shifted_states = np.append(shifted_states, train_states[:, 2:], axis=1)  + state_noise
+        shifted_next_states = np.append(shifted_next_states, train_next_states[:, 2:], axis=1)  + next_state_noise
 
         new_states = np.append(new_states, shifted_states, axis=0)
-        new_actions = np.append(new_actions, actions, axis=0)
+        new_actions = np.append(new_actions, train_actions, axis=0)
         new_next_states = np.append(new_next_states, shifted_next_states, axis=0)
         
     train_states = new_states
@@ -476,8 +514,8 @@ if __name__ == '__main__':
         agent_path += f"_lr{args.learning_rate}"
         if args.dropout > 0:
             agent_path += f"_dropout{args.dropout}"
-        if args.std > 0:
-            agent_path += f"_std{args.std}"
+        if args.dist:
+            agent_path += "_dist"
         if args.stochastic:
             agent_path += "_stochastic"
         if args.delta:
@@ -485,31 +523,33 @@ if __name__ == '__main__':
         agent_path += ".pkl"
 
     if args.new_agent:
-        agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed, std=args.std,
+        agent = MPCAgent(states.shape[-1], actions.shape[-1], seed=args.seed, dist=args.dist,
                          delta=args.delta, scale=args.scale, hidden_dim=args.hidden_dim,
-                         lr=args.learning_rate, dropout=args.dropout)
+                         lr=args.learning_rate, dropout=args.dropout, entropy_weight=args.entropy)
         
         if args.scale:
             agent.model.set_scalers(states, actions, next_states)
 
-        training_losses, test_losses = agent.train(train_states, train_actions, train_next_states,
-                                                   test_states, test_actions, test_next_states,
-                                                   epochs=args.epochs, batch_size=args.batch_size)
+        # batch_sizes = [args.batch_size, args.batch_size * 10, args.batch_size * 100, args.batch_size * 1000]
+        batch_sizes = [args.batch_size]
+        for batch_size in batch_sizes:
+            training_losses, test_losses = agent.train(train_states, train_actions, train_next_states,
+                                                    test_states, test_actions, test_next_states,
+                                                    epochs=args.epochs, batch_size=batch_size)
 
-        training_losses = np.array(training_losses).squeeze()
-        test_losses = np.array(test_losses).squeeze()
-        ignore = 20
-        print("\nMIN TEST LOSS EPOCH:", test_losses[ignore:].argmin() + ignore)
-        print("MIN TEST LOSS:", test_losses[ignore:].min())
-        plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
-        plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
-        plt.yscale('log')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Dynamics Model Loss')
-        plt.legend()
-        plt.grid()
-        plt.show()
+            training_losses = np.array(training_losses).squeeze()
+            test_losses = np.array(test_losses).squeeze()
+            print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
+            print("MIN TEST LOSS:", test_losses.min())
+            plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
+            plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+            plt.yscale('log')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Dynamics Model Loss')
+            plt.legend()
+            plt.grid()
+            plt.show()
         
         if args.save:
             print("\nSAVING MPC AGENT\n")
@@ -521,8 +561,46 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
-    # np.where((np.all(abs(actions) > 0.7, axis=1) & (actions[:, 0] * actions[:, 1] > 0)))[0]
-    # agent.get_prediction(np.array([[-0.5, -0.5, 0.0, 1.0]]), np.array([[0.8, 0.8]]))
+        agent.model.eval()
+        diffs = []
+        pred_next_states = agent.get_prediction(test_states, test_actions)
+        
+        error = abs(pred_next_states - test_next_states)
+        print("\nERROR MEAN:", error.mean(axis=0))
+        print("ERROR STD:", error.std(axis=0))
+        print("ERROR MAX:", error.max(axis=0))
+        print("ERROR MIN:", error.min(axis=0))
+
+        diffs = abs(test_states - test_next_states)
+        print("\nACTUAL MEAN:", diffs.mean(axis=0))
+        print("ACTUAL STD:", diffs.std(axis=0))
+        set_trace()
+        
+        if args.retrain:
+            training_losses, test_losses = agent.train(train_states, train_actions, train_next_states,
+                                                   test_states, test_actions, test_next_states,
+                                                   epochs=args.epochs, batch_size=args.batch_size)
+
+            training_losses = np.array(training_losses).squeeze()
+            test_losses = np.array(test_losses).squeeze()
+            ignore = 20
+            print("\nMIN TEST LOSS EPOCH:", test_losses[ignore:].argmin() + ignore)
+            print("MIN TEST LOSS:", test_losses[ignore:].min())
+            plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
+            plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+            plt.yscale('log')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Dynamics Model Loss')
+            plt.legend()
+            plt.grid()
+            plt.show()
+
+            if args.save:
+                print("\nSAVING MPC AGENT\n")
+                agent_path = args.save_agent_path if args.save_agent_path else agent_path
+                with open(agent_path, "wb") as f:
+                    pkl.dump(agent, f)
 
     agent.model.eval()
     diffs = []
