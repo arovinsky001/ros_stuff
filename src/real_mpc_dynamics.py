@@ -167,10 +167,11 @@ class MPCAgent:
                    swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1):
         state, init, goal, prev_actions = to_tensor(state, init, goal, prev_actions)
         self.state = state      # for multi-robot (swarming)
-        all_actions = torch.empty(n_steps, n_samples, 2).uniform_(*action_range)
+        all_actions = torch.empty(n_steps, n_samples, 2).uniform_(-0.99, 0.99)
+        all_actions = torch.cat((all_actions, torch.empty(n_steps, n_samples, 1).uniform_(0.05, 0.6)), dim=-1)
         states = torch.tile(state, (n_samples, 1))
         goals = torch.tile(goal, (n_samples, 1))
-        prev_actions = torch.tile(prev_actions.flatten(), (n_samples, 1))
+        # prev_actions = torch.tile(prev_actions.flatten(), (n_samples, 1))
         x1, y1, _ = init
         x2, y2, _ = goal
         vec_to_goal = (goal - init)[:2]
@@ -180,9 +181,9 @@ class MPCAgent:
 
         for i in range(n_steps):
             actions = all_actions[i]
-            actions = torch.cat((prev_actions, actions), dim=-1)
+            # actions = torch.cat((prev_actions, actions), dim=-1)
             with torch.no_grad():
-                states = to_tensor(self.get_prediction(states, actions), requires_grad=False)
+                states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
 
             # heading computations
             x0, y0, current_angle = states.T
@@ -196,13 +197,17 @@ class MPCAgent:
             
             # compute losses
             dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
-            norm_const = dist_loss.mean() / vec_to_goal.norm()
+            norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
             # dist_loss[dist_loss < 0.15] *= 0.2
             heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze()
             perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
             forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
             norm_loss = -all_actions[i, :, :-1].norm(dim=-1).squeeze() if i == 0 else 0.0
             swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
+
+            print(f"heading: {(norm_const * heading_weight * heading_loss).mean()}")
+            print(f"perp: {(norm_const * perp_weight * perp_loss).mean()}")
+            print(f"dist: {(dist_weight * dist_loss).mean()}")
 
             # normalize appropriate losses and compute total loss
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \

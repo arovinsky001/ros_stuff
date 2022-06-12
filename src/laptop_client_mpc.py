@@ -24,7 +24,7 @@ class RealMPC:
         self.flat_lim = 0.6
         self.prev_actions = np.ones((len(kami_ids), 2, 3)) * 0.9
         self.online = True
-        self.online = False
+        # self.online = False
         self.states = []
         self.actions = []
         self.next_states = []
@@ -34,7 +34,7 @@ class RealMPC:
         self.goals = goals
         self.goal = goals[0]
         self.done_count = 0
-        self.tol = 0.05
+        self.tol = 0.07
         self.dones = np.array([False] * len(kami_ids))
         self.current_states = np.zeros((len(kami_ids), 3))
         self.state_range = np.array([-np.inf, np.inf])
@@ -154,10 +154,10 @@ class RealMPC:
 
                 # for actions with duration
                 swarm_weight = 0.0
-                perp_weight = 0.5
+                perp_weight = 1.5
                 heading_weight = 0.5
                 forward_weight = 0.0
-                dist_weight = 2.0
+                dist_weight = 1.0
                 norm_weight = 0.0
                 action = agent.mpc_action(states[i], self.init_states[i], self.goal, self.prev_actions[i],
                                         self.state_range, self.action_range, swarm=False, n_steps=self.mpc_steps,
@@ -277,15 +277,15 @@ if __name__ == '__main__':
     #                   [-0.5, -0.1, 0.0, 1.0],
     #                   [-1.0,  -0.9, 0.0, 1.0]])
 
-    goals = np.array([[-0.4, 0.1, 0.0, 1.0],
-                      [-0.3, -0.75, 0.0, 1.0],
-                      [-1.1, -0.75, 0.0, 1.0],
-                      [-1.1, 0.0, 0.0, 1.0]])
+    goals = np.array([[-0.5, 0.0, 0.0],
+                      [-0.5, -1.0, 0.0],
+                      [-1.4, -1.0, 0.0],
+                      [-1.4, 0.0, 0.0]])
 
     # n_goals = 200
     # goals = np.random.uniform(low=[-1.4, -1.0], high=[-0.4, 0.0], size=(n_goals, 2))
     # goals = np.append(goals, np.tile(np.array([0., 1.]), (n_goals, 1)), axis=-1)
 
-    mpc_steps = 3
-    mpc_samples = 1000
+    mpc_steps = 1
+    mpc_samples = 500
     r = RealMPC(kami_ids, agent_path, goals, mpc_steps, mpc_samples)
