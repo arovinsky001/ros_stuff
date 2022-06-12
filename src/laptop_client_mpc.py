@@ -116,7 +116,6 @@ class RealMPC:
         states = self.get_states()
 
         if not hasattr(self, "init_states"):
-            self.original_init_states = states
             self.init_states = states
 
         diff = self.goal - states
@@ -132,15 +131,12 @@ class RealMPC:
                 plt.ylabel("Distance to Goal")
                 plt.title("Kamigami MPC")
                 plt.show()
-                # rospy.signal_shutdown("Finished! All robots reached goal.")
+                rospy.signal_shutdown("Finished! All robots reached goal.")
             else:
                 for i in range(len(self.dones)):
                     self.dones[i] = False
                 self.done_count += 1
-                if self.done_count == len(self.goals):
-                    self.goal = self.original_init_states[0]
-                else:
-                    self.goal = self.goals[self.done_count]
+                self.goal = self.goals[self.done_count]
                 print(f"\n\nNEW GOAL: {self.goal}\n")
                 self.init_states = self.goals[None, self.done_count-1]
                 self.step_count = 1
@@ -227,9 +223,8 @@ class RealMPC:
             current_states = current_states.mean(axis=0, keepdims=True)
         else:
             current_states = current_states.mean(axis=1)
-        theta = current_states[:, -1]
-        states = np.block([current_states[:, :-1], np.sin(theta)[:, None], np.cos(theta)[:, None]])
-        return states
+
+        return current_states
     
     def save_data(self, clip_end=False):
         states = np.array(self.states)
