@@ -16,8 +16,6 @@ from torchcontrib.optim import SWA
 from tqdm import trange, tqdm
 from time import time
 
-from sim.scripts.generate_data import *
-
 pi = torch.pi
 device = torch.device("cpu")
 
@@ -276,6 +274,23 @@ class MPCAgent:
         
         train_states = torch.stack([torch.sin(train_states[:, -1]), torch.cos(train_states[:, -1])], dim=1)
 
+        n_train_states = train_states
+        n_train_actions = train_actions
+        n_train_states_delta = train_states_delta
+
+        for _ in range(5):
+            n_states = train_states + torch.normal(torch.zeros_like(train_states), torch.ones_like(train_states) * 0.001)
+            n_actions = train_actions + torch.normal(torch.zeros_like(train_actions), torch.ones_like(train_actions) * 0.001)
+            n_states_delta = train_states_delta + torch.normal(torch.zeros_like(train_states_delta), torch.ones_like(train_states_delta) * 0.001)
+
+            n_train_states = torch.cat([n_train_states, n_states], dim=0)
+            n_train_actions = torch.cat([n_train_actions, n_actions], dim=0)
+            n_train_states_delta = torch.cat([n_train_states_delta, n_states_delta], dim=0)
+        
+        train_states = n_train_states
+        train_actions = n_train_actions
+        train_states_delta = n_train_states_delta
+
         if set_scalers:
             agent.model.set_scalers(train_states, train_actions, train_states_delta)
 
@@ -399,8 +414,8 @@ if __name__ == '__main__':
         device = torch.device("cpu")
 
     if args.real:
-        agent_path = 'agents/real.pkl'
-        data = np.load("sim/data/real_data.npz")
+        agent_path = '../../agents/real.pkl'
+        data = np.load("../../sim/data/real_data.npz")
     else:
         agent_path = 'agents/'
         if args.stochastic:
@@ -414,15 +429,8 @@ if __name__ == '__main__':
     actions = data['actions']
     next_states = data['next_states']
 
-    # TODO: TEMPORARY
-    thetas = np.arctan2(states[:, -2], states[:, -1])
-    states = np.append(states[:, :2], thetas[:, None], axis=-1)
-    thetas = np.arctan2(next_states[:, -2], next_states[:, -1])
-    next_states = np.append(next_states[:, :2], thetas[:, None], axis=-1)
-    actions = actions[:, -3:]
-
     if args.retrain:
-        online_data = np.load("sim/data/real_data_online.npz")
+        online_data = np.load("../../sim/data/real_data_online.npz")
     
         online_states = online_data['states']
         online_actions = online_data['actions']
@@ -441,6 +449,13 @@ if __name__ == '__main__':
         states = online_states
         actions = online_actions
         next_states = online_next_states
+
+    # TODO: TEMPORARY
+    # thetas = np.arctan2(states[:, -2], states[:, -1])
+    # states = np.append(states[:, :2], thetas[:, None], axis=-1)
+    # thetas = np.arctan2(next_states[:, -2], next_states[:, -1])
+    # next_states = np.append(next_states[:, :2], thetas[:, None], axis=-1)
+    actions = actions[:, -3:]
 
     plot_data = False
     if plot_data:
@@ -546,24 +561,23 @@ if __name__ == '__main__':
         with open(agent_path, "rb") as f:
             agent = pkl.load(f)
 
-        agent.model.eval()
-        diffs = []
-        pred_next_states = agent.get_prediction(test_states, test_actions)
+        # agent.model.eval()
+        # diffs = []
+        # pred_next_states = agent.get_prediction(test_states, test_actions)
         
-        error = abs(pred_next_states - test_states_delta)
-        print("\nERROR MEAN:", error.mean(axis=0))
-        print("ERROR STD:", error.std(axis=0))
-        print("ERROR MAX:", error.max(axis=0))
-        print("ERROR MIN:", error.min(axis=0))
+        # error = abs(pred_next_states - test_states_delta)
+        # print("\nERROR MEAN:", error.mean(axis=0))
+        # print("ERROR STD:", error.std(axis=0))
+        # print("ERROR MAX:", error.max(axis=0))
+        # print("ERROR MIN:", error.min(axis=0))
 
-        diffs = abs(test_states - test_states_delta)
-        print("\nACTUAL MEAN:", diffs.mean(axis=0))
-        print("ACTUAL STD:", diffs.std(axis=0))
-        set_trace()
+        # diffs = abs(test_states - test_states_delta)
+        # print("\nACTUAL MEAN:", diffs.mean(axis=0))
+        # print("ACTUAL STD:", diffs.std(axis=0))
+        # set_trace()
         
         if args.retrain:
-            training_losses, test_losses = agent.train(train_states, train_actions, train_states_delta,
-                                                   test_states, test_actions, test_states_delta,
+            training_losses, test_losses, test_idx = agent.train(states, actions, next_states,
                                                    epochs=args.epochs, batch_size=args.batch_size)
 
             training_losses = np.array(training_losses).squeeze()
@@ -601,7 +615,7 @@ if __name__ == '__main__':
     test_states_delta = dcn(states_delta[test_idx])
     pred_states_delta = agent.get_prediction(test_states, test_actions, sample=False, delta=True)
     
-    error = (pred_states_delta - test_states_delta)
+    error = abs(pred_states_delta - test_states_delta)
     print("\nERROR MEAN:", error.mean(axis=0))
     print("ERROR STD:", error.std(axis=0))
     print("ERROR MAX:", error.max(axis=0))
