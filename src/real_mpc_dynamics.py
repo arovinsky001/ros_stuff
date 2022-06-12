@@ -197,14 +197,15 @@ class MPCAgent:
             
             # compute losses
             dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
+            norm_const = dist_loss.mean() / vec_to_goal.norm()
+            # dist_loss[dist_loss < 0.15] *= 0.2
             heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze()
             perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
             forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
-            norm_loss = -all_actions[i].norm(dim=-1).squeeze() if i == 0 else 0.0
+            norm_loss = -all_actions[i, :, :-1].norm(dim=-1).squeeze() if i == 0 else 0.0
             swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
 
             # normalize appropriate losses and compute total loss
-            norm_const = dist_loss.mean() / vec_to_goal.norm()
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
                                 + swarm_weight * swarm_loss + norm_weight * norm_loss) \
                                 + dist_weight * dist_loss + forward_weight * forward_loss
