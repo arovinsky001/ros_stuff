@@ -183,7 +183,6 @@ class MPCAgent:
             actions = torch.cat((prev_actions, actions), dim=-1)
             with torch.no_grad():
                 states = to_tensor(self.get_prediction(states, actions), requires_grad=False)
-            states[:, 2:] = torch.clamp(states[:, 2:], -1., 1.)
 
             # heading computations
             x0, y0, current_angle = states.T
@@ -221,16 +220,16 @@ class MPCAgent:
         """
         states_xy, actions = to_tensor(states_xy, actions)
         thetas = states_xy[:, -1]
-        states = torch.stack([torch.sin(thetas), torch.cos(thetas)], dim=1)
+        sc = torch.stack([torch.sin(thetas), torch.cos(thetas)], dim=1)
 
         if self.scale and scale:
-            states, actions = self.model.get_scaled(states, actions)
+            sc, actions = self.model.get_scaled(sc, actions)
 
-        states, actions = to_tensor(states, actions)
-        states, actions = to_device(states, actions)
+        sc, actions = to_tensor(sc, actions)
+        sc, actions = to_device(sc, actions)
 
         with torch.no_grad():
-            model_output = self.model(states, actions)
+            model_output = self.model(sc, actions)
 
         if self.model.dist:
             if sample:
@@ -246,7 +245,10 @@ class MPCAgent:
         if delta:
             return states_delta
 
-        next_states = states_xy + states_delta
+        states_sc = torch.cat([states_xy[:, :-1], sc], dim=-1)
+        next_states_sc = states_sc + states_delta
+        n_thetas = torch.atan2(next_states_sc[:, 2], next_states_sc[:, 3]).reshape(-1, 1)
+        next_states = torch.cat([next_states_sc[:, :2], n_thetas], dim=-1)
         next_states = dcn(next_states)
         return next_states
 
