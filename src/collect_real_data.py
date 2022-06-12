@@ -137,9 +137,8 @@ class DataCollector:
         
         current_states = np.array(current_states)
         current_state = current_states.mean(axis=0).squeeze()
-        theta = current_state[2]
-        state = np.array([current_state[0], current_state[1], np.sin(theta), np.cos(theta)])
-        return state
+
+        return current_state
     
     def get_command_action(self):
         action = np.random.uniform(*self.action_range, size=self.action_range.shape[-1])
