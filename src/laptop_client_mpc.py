@@ -10,7 +10,7 @@ from ar_track_alvar_msgs.msg import AlvarMarkers
 from ros_stuff.srv import CommandAction
 from ros_stuff.msg import RobotCmd
 from tf.transformations import euler_from_quaternion
-from forward_mpc_agent import *
+from real_mpc_dynamics import *
 
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online.npz"
 
