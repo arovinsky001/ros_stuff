@@ -292,7 +292,7 @@ class MPCAgent:
 
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
-                train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=0.1, random_state=self.seed)
+                train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=0.4, random_state=self.seed)
         
         if self.multi:
             train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
@@ -467,6 +467,8 @@ if __name__ == '__main__':
     actions = data['actions']
     next_states = data['next_states']
 
+    actions = np.flip(actions, axis=1)
+
     if not args.multi:
         states = states.reshape(-1, states.shape[-1])[1::2]
         actions = actions.reshape(-1, actions.shape[-1])[1::2]
@@ -493,26 +495,6 @@ if __name__ == '__main__':
         actions = online_actions
         next_states = online_next_states
 
-    # TODO: TEMPORARY
-    # thetas = np.arctan2(states[:, -2], states[:, -1])
-    # states = np.append(states[:, :2], thetas[:, None], axis=-1)
-    # thetas = np.arctan2(next_states[:, -2], next_states[:, -1])
-    # next_states = np.append(next_states[:, :2], thetas[:, None], axis=-1)
-    # actions = actions[:, -3:]
-    
-    # if args.multi:
-    #     n_robots = states.shape[1]
-    #     id = np.eye(n_robots)
-    #     id_tile = np.tile(id, (len(states), 1, 1))
-
-    #     states = np.append(states, id_tile, axis=-1)
-    #     actions = np.append(actions, id_tile, axis=-1)
-    #     next_states = np.append(next_states, id_tile, axis=-1)
-
-    #     states = states.reshape(-1, states.shape[-1])
-    #     actions = actions.reshape(-1, actions.shape[-1])
-    #     next_states = next_states.reshape(-1, next_states.shape[-1])
-
     plot_data = False
     if plot_data:
         plotstart = 10
@@ -525,15 +507,17 @@ if __name__ == '__main__':
         next_states_x = next_states[plotstart:plotend, 0]
         next_states_y = next_states[plotstart:plotend, 1]
 
-        states_sin = states[plotstart:plotend, 2]
-        states_cos = states[plotstart:plotend, 3]
-        next_states_sin = next_states[plotstart:plotend, 2]
-        next_states_cos = next_states[plotstart:plotend, 3]
-        states_theta = np.arctan2(states_sin, states_cos)
+        # states_sin = states[plotstart:plotend, 2]
+        # states_cos = states[plotstart:plotend, 3]
+        # next_states_sin = next_states[plotstart:plotend, 2]
+        # next_states_cos = next_states[plotstart:plotend, 3]
+        # states_theta = np.arctan2(states_sin, states_cos)
+        states_theta = states[plotstart:plotend, -1]
         states_theta += pi
         states_sin = np.sin(states_theta)
         states_cos = np.cos(states_theta)
-        next_states_theta = np.arctan2(next_states_sin, next_states_cos)
+        # next_states_theta = np.arctan2(next_states_sin, next_states_cos)
+        next_states_theta = next_states[plotstart:plotend, -1]
         next_states_theta += pi
         next_states_sin = np.sin(next_states_theta)
         next_states_cos = np.cos(next_states_theta)
