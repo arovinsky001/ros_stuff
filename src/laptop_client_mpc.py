@@ -15,35 +15,34 @@ from real_mpc_dynamics import *
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online.npz"
 
 class RealMPC:
-    def __init__(self, kami_ids, agent_path, goals, mpc_steps, mpc_samples):
+    def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples):
         self.step_count = 1
         self.flat_count = 0
         self.n_updates = 0
         self.n_avg_states = 2
         self.n_wait_updates = 2
         self.flat_lim = 0.6
-        self.prev_actions = np.ones((len(kami_ids), 2, 3)) * 0.9
         self.online = True
         # self.online = False
         self.states = []
         self.actions = []
         self.next_states = []
 
-        self.kami_ids = np.array(kami_ids)
+        self.robot_ids = np.array(robot_ids)
         self.agents = []
         self.goals = goals
         self.goal = goals[0]
         self.done_count = 0
         self.tol = 0.07
-        self.dones = np.array([False] * len(kami_ids))
-        self.current_states = np.zeros((len(kami_ids), 3))
+        self.dones = np.array([False] * len(robot_ids))
+        self.current_states = np.zeros((len(robot_ids), 3))
         self.state_range = np.array([-np.inf, np.inf])
         action = 0.99
         self.action_range = np.array([[-action, -action, 0.05], [action, action, 0.6]])
         self.mpc_steps = mpc_steps
         self.mpc_samples = mpc_samples
         self.dists = []
-        for _ in self.kami_ids:
+        for _ in self.robot_ids:
             with open(agent_path, "rb") as f:
                 self.agents.append(pkl.load(f))
                 self.agents[-1].model.eval()
@@ -63,8 +62,8 @@ class RealMPC:
         try:
             found_robot = False
             for marker in msg.markers:
-                if marker.id in self.kami_ids:
-                    idx = np.argwhere(self.kami_ids == marker.id)
+                if marker.id in self.robot_ids:
+                    idx = np.argwhere(self.robot_ids == marker.id)
                     if len(self.dones == 1):
                         if self.dones[0]:
                             continue
@@ -159,7 +158,7 @@ class RealMPC:
                 forward_weight = 0.0
                 dist_weight = 1.0
                 norm_weight = 0.0
-                action = agent.mpc_action(states[i], self.init_states[i], self.goal, self.prev_actions[i],
+                action = agent.mpc_action(states[i], self.init_states[i], self.goal,
                                         self.state_range, self.action_range, swarm=False, n_steps=self.mpc_steps,
                                         n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
                                         heading_weight=heading_weight, forward_weight=forward_weight,
@@ -175,10 +174,7 @@ class RealMPC:
                 action_req.duration = action[2]
                 print("\nACTION:", action)
                 print("STATE:", states[i], '\n')
-                self.command_action(action_req, f"kami{self.kami_ids[i]}")
-                actions3 = np.block([self.prev_actions[i, 0], self.prev_actions[i, 1], action])
-                self.prev_actions[i, 0] = self.prev_actions[i, 1]
-                self.prev_actions[i, 1] = action
+                self.command_action(action_req, f"kami{self.robot_ids[i]}")
 
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
@@ -189,7 +185,7 @@ class RealMPC:
         if self.online:
             next_state = self.get_states()
             self.states.append(states[0])
-            self.actions.append(actions3)
+            self.actions.append(action)
             self.next_states.append(next_state[0])
             if self.step_count % 5 == 0:
                 self.save_data()
@@ -269,7 +265,7 @@ class RealMPC:
 
 
 if __name__ == '__main__':
-    kami_ids = [0]
+    robot_ids = [0]
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
 
     # goals = np.array([[-1.0,  -0.9, 0.0, 1.0],
@@ -288,4 +284,4 @@ if __name__ == '__main__':
 
     mpc_steps = 1
     mpc_samples = 500
-    r = RealMPC(kami_ids, agent_path, goals, mpc_steps, mpc_samples)
+    r = RealMPC(robot_ids, agent_path, goals, mpc_steps, mpc_samples)
