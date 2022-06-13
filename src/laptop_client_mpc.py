@@ -34,7 +34,7 @@ class RealMPC:
         self.goals = goals
         self.goal = goals[0]
         self.done_count = 0
-        self.tol = 0.07
+        self.tol = 0.08
         self.dones = np.array([False] * len(kami_ids))
         self.current_states = np.zeros((len(kami_ids), 3))
         self.state_range = np.array([-np.inf, np.inf])
@@ -51,8 +51,8 @@ class RealMPC:
 
         # Get info on positioning from camera & AR tags
         print("waiting for service")
-        rospy.wait_for_service('/kami1/server')
-        self.command_action = rospy.ServiceProxy('/kami1/server', CommandAction)
+        rospy.wait_for_service('/kami2/server')
+        self.command_action = rospy.ServiceProxy(f'/kami{kami_ids[0]}/server', CommandAction)
         print("service loaded")
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
 
@@ -269,7 +269,7 @@ class RealMPC:
 
 
 if __name__ == '__main__':
-    kami_ids = [0]
+    kami_ids = [1]
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
 
     # goals = np.array([[-1.0,  -0.9, 0.0, 1.0],
@@ -286,6 +286,6 @@ if __name__ == '__main__':
     # goals = np.random.uniform(low=[-1.4, -1.0], high=[-0.4, 0.0], size=(n_goals, 2))
     # goals = np.append(goals, np.tile(np.array([0., 1.]), (n_goals, 1)), axis=-1)
 
-    mpc_steps = 1
+    mpc_steps = 2
     mpc_samples = 500
     r = RealMPC(kami_ids, agent_path, goals, mpc_steps, mpc_samples)
