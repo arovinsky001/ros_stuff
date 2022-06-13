@@ -41,7 +41,7 @@ def to_tensor(*args, requires_grad=True):
     return ret if len(ret) > 1 else ret[0]
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=256, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True):
+    def __init__(self, input_dim, output_dim, hidden_dim=256, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True, multi=False):
         super(DynamicsNetwork, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -59,6 +59,7 @@ class DynamicsNetwork(nn.Module):
         self.loss_fn = nn.MSELoss(reduction='none')
         self.dist = dist
         self.entropy_weight = entropy_weight
+        self.multi = multi
         self.input_scaler = None
         self.output_scaler = None
         self._init_weights()
@@ -68,39 +69,47 @@ class DynamicsNetwork(nn.Module):
             torch.nn.init.xavier_uniform_(m.weight)
             self.model.bias.data.fill_(0.01)
 
-    def forward(self, state, action):
+    def forward(self, state, action, id=None):
+        if self.multi:
+            id = to_tensor(id)
         state, action = to_tensor(state, action)
+
         if len(state.shape) == 1:
             state = state[None, :]
         if len(action.shape) == 1:
             action = action[None, :]
+        if self.multi and len(id.shape) == 1:
+            id = id[None, :]
 
         state_action = torch.cat([state, action], dim=-1).float()
+        if self.multi:
+            state_action = torch.cat([state_action, id], dim=-1).float()
+
         if self.dist:
             mean_std = self.model(state_action)
             mean = mean_std[:, :self.output_dim]
             std = mean_std[:, self.output_dim:]
             std = torch.clamp(std, min=1e-6)
-            try:
-                return torch.distributions.normal.Normal(mean, std)
-            except:
-                set_trace()
+            return torch.distributions.normal.Normal(mean, std)
         else:
             pred = self.model(state_action)
             return pred
         
 
-    def update(self, state, action, state_delta, retain_graph=False):
+    def update(self, state, action, state_delta, id=None, retain_graph=False):
         self.train()
+        
+        if self.multi:
+            id = to_tensor(id)
         state, action, state_delta = to_tensor(state, action, state_delta)
         
         if self.dist:
-            dist = self(state, action)
+            dist = self(state, action, id)
             pred_state_delta = dist.rsample()
             losses = self.loss_fn(pred_state_delta, state_delta)
             losses -= dist.entropy() * self.entropy_weight
         else:
-            pred_state_delta = self(state, action)
+            pred_state_delta = self(state, action, id)
             losses = self.loss_fn(pred_state_delta, state_delta)
         loss = losses.mean()
         # sin = pred_state_delta[:, 2] + state[:, 0]
@@ -131,10 +140,8 @@ class DynamicsNetwork(nn.Module):
                 states = states[None, :]
             if len(actions.shape) == 1:
                 actions = actions[None, :]
-            try:
-                states_actions = np.append(states, actions, axis=-1)
-            except:
-                set_trace()
+            
+            states_actions = np.append(states, actions, axis=-1)
             states_actions_scaled = self.input_scaler.transform(states_actions)
             states_scaled = states_actions_scaled[:, :states.shape[-1]]
             actions_scaled = states_actions_scaled[:, states.shape[-1]:]
@@ -151,25 +158,24 @@ class DynamicsNetwork(nn.Module):
 
 
 class MPCAgent:
-    def __init__(self, input_dim, output_dim, seed=1, hidden_dim=512, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True):
-        self.model = DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist)
+    def __init__(self, input_dim, output_dim, seed=1, hidden_dim=512, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True, multi=False):
+        self.model = DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist, multi=multi)
         self.model.to(device)
         self.seed = seed
         self.mse_loss = nn.MSELoss(reduction='none')
         self.neighbors = []
         self.state = None
         self.scale = scale
-        self.time = 0
+        self.multi = multi
 
-    def mpc_action(self, state, init, goal, prev_actions, state_range, action_range, swarm=False, n_steps=10, n_samples=1000,
+    def mpc_action(self, state, init, goal, state_range, action_range, swarm=False, n_steps=10, n_samples=1000,
                    swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1):
-        state, init, goal, prev_actions = to_tensor(state, init, goal, prev_actions)
+        state, init, goal = to_tensor(state, init, goal)
         self.state = state      # for multi-robot (swarming)
         all_actions = torch.empty(n_steps, n_samples, 2).uniform_(-0.99, 0.99)
         all_actions = torch.cat((all_actions, torch.empty(n_steps, n_samples, 1).uniform_(0.05, 0.6)), dim=-1)
         states = torch.tile(state, (n_samples, 1))
         goals = torch.tile(goal, (n_samples, 1))
-        # prev_actions = torch.tile(prev_actions.flatten(), (n_samples, 1))
         x1, y1, _ = init
         x2, y2, _ = goal
         vec_to_goal = (goal - init)[:2]
@@ -179,7 +185,6 @@ class MPCAgent:
 
         for i in range(n_steps):
             actions = all_actions[i]
-            # actions = torch.cat((prev_actions, actions), dim=-1)
             with torch.no_grad():
                 states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
 
@@ -216,7 +221,7 @@ class MPCAgent:
         best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
-    def get_prediction(self, states_xy, actions, scale=True, sample=True, delta=False):
+    def get_prediction(self, states_xy, actions, ids=None, scale=True, sample=True, delta=False):
         """
         Accepts state [x, y, theta]
         Returns next_state [x, y, theta]
@@ -228,11 +233,13 @@ class MPCAgent:
         if self.scale and scale:
             sc, actions = self.model.get_scaled(sc, actions)
 
+        if self.multi:
+            ids = to_device(to_tensor(ids))
         sc, actions = to_tensor(sc, actions)
         sc, actions = to_device(sc, actions)
 
         with torch.no_grad():
-            model_output = self.model(sc, actions)
+            model_output = self.model(sc, actions, ids)
 
         if self.model.dist:
             if sample:
@@ -267,6 +274,16 @@ class MPCAgent:
 
     def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False):
         states, actions, next_states = to_tensor(states, actions, next_states)
+
+        if self.multi:
+            n_robots = states.shape[1]
+            ids = torch.eye(n_robots)
+            all_ids = torch.tile(ids, (len(states), 1))
+
+            states = states.reshape(-1, states.shape[-1])
+            actions = actions.reshape(-1, actions.shape[-1])
+            next_states = next_states.reshape(-1, next_states.shape[-1])
+
         sc = torch.stack([torch.sin(states[:, -1]), torch.cos(states[:, -1])], dim=1)
         states_sc = torch.cat([states[:, :-1], sc], dim=-1)
         sc = torch.stack([torch.sin(next_states[:, -1]), torch.cos(next_states[:, -1])], dim=1)
@@ -277,24 +294,29 @@ class MPCAgent:
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=0.1, random_state=self.seed)
         
+        if self.multi:
+            train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
+        else:
+            train_ids, test_ids = None, None
+
         train_states = torch.stack([torch.sin(train_states[:, -1]), torch.cos(train_states[:, -1])], dim=1)
 
-        n_train_states = train_states
-        n_train_actions = train_actions
-        n_train_states_delta = train_states_delta
+        # n_train_states = train_states
+        # n_train_actions = train_actions
+        # n_train_states_delta = train_states_delta
 
-        for _ in range(5):
-            n_states = train_states + torch.normal(torch.zeros_like(train_states), torch.ones_like(train_states) * 0.001)
-            n_actions = train_actions + torch.normal(torch.zeros_like(train_actions), torch.ones_like(train_actions) * 0.001)
-            n_states_delta = train_states_delta + torch.normal(torch.zeros_like(train_states_delta), torch.ones_like(train_states_delta) * 0.001)
+        # for _ in range(5):
+        #     n_states = train_states + torch.normal(torch.zeros_like(train_states), torch.ones_like(train_states) * 0.001)
+        #     n_actions = train_actions + torch.normal(torch.zeros_like(train_actions), torch.ones_like(train_actions) * 0.001)
+        #     n_states_delta = train_states_delta + torch.normal(torch.zeros_like(train_states_delta), torch.ones_like(train_states_delta) * 0.001)
 
-            n_train_states = torch.cat([n_train_states, n_states], dim=0)
-            n_train_actions = torch.cat([n_train_actions, n_actions], dim=0)
-            n_train_states_delta = torch.cat([n_train_states_delta, n_states_delta], dim=0)
+        #     n_train_states = torch.cat([n_train_states, n_states], dim=0)
+        #     n_train_actions = torch.cat([n_train_actions, n_actions], dim=0)
+        #     n_train_states_delta = torch.cat([n_train_states_delta, n_states_delta], dim=0)
         
-        train_states = n_train_states
-        train_actions = n_train_actions
-        train_states_delta = n_train_states_delta
+        # train_states = n_train_states
+        # train_actions = n_train_actions
+        # train_states_delta = n_train_states_delta
 
         if set_scalers:
             agent.model.set_scalers(train_states, train_actions, train_states_delta)
@@ -305,6 +327,7 @@ class MPCAgent:
             # train_states += np.random.normal(0.0, 0.05, size=train_states.shape)
             # train_actions += np.random.normal(0.0, 0.05, size=train_actions.shape)
             # train_next_states += np.random.normal(0.0, 0.05, size=train_next_states.shape)
+
         train_states, train_actions, train_states_delta = to_tensor(train_states, train_actions, train_states_delta)
         test_states, test_actions, test_states_delta = to_tensor(test_states, test_actions, test_states_delta)
 
@@ -315,7 +338,7 @@ class MPCAgent:
 
         self.model.eval()
         with torch.no_grad():
-            pred_states_delta = to_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True))
+            pred_states_delta = to_tensor(self.get_prediction(test_states, test_actions, test_ids, sample=False, delta=True))
         test_loss = self.mse_loss(pred_states_delta, test_states_delta)
         test_loss_mean = dcn(test_loss.mean())
         test_losses.append(test_loss_mean)
@@ -324,14 +347,22 @@ class MPCAgent:
 
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
             np.random.shuffle(idx)
-            train_states, train_actions, train_states_delta = train_states[idx], train_actions[idx], train_states_delta[idx]                
+            train_states, train_actions, train_states_delta = train_states[idx], train_actions[idx], train_states_delta[idx]
+            if self.multi:
+                train_ids = train_ids[idx]
 
             for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
-                batch_states = torch.autograd.Variable(train_states[j*batch_size:(j+1)*batch_size])
-                batch_actions = torch.autograd.Variable(train_actions[j*batch_size:(j+1)*batch_size])
-                batch_states_delta = torch.autograd.Variable(train_states_delta[j*batch_size:(j+1)*batch_size])
+                start, end = j * batch_size, (j + 1) * batch_size
+                batch_states = torch.autograd.Variable(train_states[start:end])
+                batch_actions = torch.autograd.Variable(train_actions[start:end])
+                batch_states_delta = torch.autograd.Variable(train_states_delta[start:end])
+                if self.multi:
+                    batch_ids = to_device(torch.autograd.Variable(train_ids[start:end]))
+                else:
+                    batch_ids = None
                 batch_states, batch_actions, batch_states_delta = to_device(batch_states, batch_actions, batch_states_delta)
-                training_loss = self.model.update(batch_states, batch_actions, batch_states_delta)
+                
+                training_loss = self.model.update(batch_states, batch_actions, batch_states_delta, batch_ids)
                 if type(training_loss) != float:
                     while len(training_loss.shape) > 1:
                         training_loss = training_loss.mean(axis=-1)
@@ -340,7 +371,7 @@ class MPCAgent:
             training_losses.append(training_loss_mean)
             self.model.eval()
             with torch.no_grad():
-                pred_states_delta = to_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True))
+                pred_states_delta = to_tensor(self.get_prediction(test_states, test_actions, test_ids, sample=False, delta=True))
             test_loss = self.mse_loss(pred_states_delta, test_states_delta)
             test_loss_mean = dcn(test_loss.mean())
             test_losses.append(test_loss_mean)
@@ -405,6 +436,8 @@ if __name__ == '__main__':
                         help='flag to load existing model and continue training')
     parser.add_argument('-entropy', type=float, default=0.02,
                         help='weight for entropy term in training loss function')
+    parser.add_argument('-multi', action='store_true',
+                        help='flag to use data from multiple robots')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -434,6 +467,11 @@ if __name__ == '__main__':
     actions = data['actions']
     next_states = data['next_states']
 
+    if not args.multi:
+        states = states.reshape(-1, states.shape[-1])[1::2]
+        actions = actions.reshape(-1, actions.shape[-1])[1::2]
+        next_states = next_states.reshape(-1, next_states.shape[-1])[1::2]
+
     if args.retrain:
         online_data = np.load("../../sim/data/real_data_online.npz")
     
@@ -447,9 +485,9 @@ if __name__ == '__main__':
         online_actions = np.tile(online_actions, (n_repeat, 1))
         online_next_states = np.tile(online_next_states, (n_repeat, 1))
 
-        states = np.append(states, online_states, axis=0)
-        actions = np.append(actions, online_actions, axis=0)
-        next_states = np.append(next_states, online_next_states, axis=0)
+        # states = np.append(states, online_states, axis=0)
+        # actions = np.append(actions, online_actions, axis=0)
+        # next_states = np.append(next_states, online_next_states, axis=0)
 
         states = online_states
         actions = online_actions
@@ -460,7 +498,20 @@ if __name__ == '__main__':
     # states = np.append(states[:, :2], thetas[:, None], axis=-1)
     # thetas = np.arctan2(next_states[:, -2], next_states[:, -1])
     # next_states = np.append(next_states[:, :2], thetas[:, None], axis=-1)
-    actions = actions[:, -3:]
+    # actions = actions[:, -3:]
+    
+    # if args.multi:
+    #     n_robots = states.shape[1]
+    #     id = np.eye(n_robots)
+    #     id_tile = np.tile(id, (len(states), 1, 1))
+
+    #     states = np.append(states, id_tile, axis=-1)
+    #     actions = np.append(actions, id_tile, axis=-1)
+    #     next_states = np.append(next_states, id_tile, axis=-1)
+
+    #     states = states.reshape(-1, states.shape[-1])
+    #     actions = actions.reshape(-1, actions.shape[-1])
+    #     next_states = next_states.reshape(-1, next_states.shape[-1])
 
     plot_data = False
     if plot_data:
@@ -532,9 +583,14 @@ if __name__ == '__main__':
         agent_path += ".pkl"
 
     if args.new_agent:
-        agent = MPCAgent(2 + actions.shape[-1], 4, seed=args.seed, dist=args.dist,
-                         scale=args.scale, hidden_dim=args.hidden_dim, lr=args.learning_rate,
-                         dropout=args.dropout, entropy_weight=args.entropy)
+        input_dim = actions.shape[-1] + 2
+        output_dim = 4
+        if args.multi:
+            input_dim += 2
+        
+        agent = MPCAgent(input_dim, output_dim, seed=args.seed, dist=args.dist,
+                         scale=args.scale, multi=args.multi, hidden_dim=args.hidden_dim,
+                         lr=args.learning_rate, dropout=args.dropout, entropy_weight=args.entropy)
 
         batch_sizes = [args.batch_size, args.batch_size * 10, args.batch_size * 100, args.batch_size * 1000]
         batch_sizes = [args.batch_size]
@@ -608,6 +664,15 @@ if __name__ == '__main__':
 
     agent.model.eval()
 
+    if args.multi:
+        n_robots = states.shape[1]
+        ids = torch.eye(n_robots)
+        all_ids = torch.tile(ids, (len(states), 1))
+
+        states = states.reshape(-1, states.shape[-1])
+        actions = actions.reshape(-1, actions.shape[-1])
+        next_states = next_states.reshape(-1, next_states.shape[-1])
+
     states, actions, next_states = to_tensor(states, actions, next_states)
     sc = torch.stack([torch.sin(states[:, -1]), torch.cos(states[:, -1])], dim=1)
     states_sc = torch.cat([states[:, :-1], sc], dim=-1)
@@ -616,9 +681,14 @@ if __name__ == '__main__':
     states_delta = next_states_sc - states_sc
 
     test_states, test_actions = states[test_idx], actions[test_idx]
-    # set_trace()
+    if args.multi:
+        test_ids = all_ids[test_idx]
+
     test_states_delta = dcn(states_delta[test_idx])
-    pred_states_delta = agent.get_prediction(test_states, test_actions, sample=False, delta=True)
+    if args.multi:
+        pred_states_delta = agent.get_prediction(test_states, test_actions, test_ids, sample=False, delta=True)
+    else:
+        pred_states_delta = agent.get_prediction(test_states, test_actions, sample=False, delta=True)
     
     error = abs(pred_states_delta - test_states_delta)
     print("\nERROR MEAN:", error.mean(axis=0))
