@@ -14,7 +14,7 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.np
 
 class DataCollector:
     def __init__(self):
-        self.action_range = np.array([[-0.99, -0.99, 0.05], [0.99, 0.99, 0.6]])
+        self.action_range = np.array([[-0.99, -0.99, 0.1], [0.99, 0.99, 0.8]])
         self.robot_ids = np.array([0, 2])
 
         self.n_avg_states = 2
@@ -44,12 +44,12 @@ class DataCollector:
 
     def update_state(self, msg):
         try:
-            found_robot = False
+            found_robots = [False] * len(self.robot_ids)
             for marker in msg.markers:
                 if marker.id in self.robot_ids:
                     idx = np.argwhere(self.robot_ids == marker.id).squeeze().item()
                     state = self.current_states[idx]
-                    found_robot = True
+                    found_robots[idx] = True
                 else:
                     continue
                                 
@@ -67,7 +67,7 @@ class DataCollector:
                 state[1] = marker.pose.pose.position.y
                 state[2] = z % (2 * np.pi)
             
-            if not found_robot:
+            if not np.all(found_robots):
                 self.found_count += 1
             else:
                 self.found_count = 0
@@ -109,11 +109,17 @@ class DataCollector:
             return None
 
         if self.found_count > 0:
-            action_req = RobotCmd()
-            action_req.left_pwm = 0.9
-            action_req.right_pwm = -0.9
-            self.command_action(action_req, 'kami1')
             print("PERTURBING")
+
+            reqs = [RobotCmd() for _ in range(len(self.robot_ids))]
+            for req in reqs:
+                req.left_pwm = 0.9
+                req.right_pwm = -0.9
+                req.duration = 0.2
+            
+            for i, proxy in enumerate(self.service_proxies):
+                proxy(reqs[i], f'kami{i+1}')
+
             rospy.sleep(0.01)
             self.perturb_count += 1
             return None
