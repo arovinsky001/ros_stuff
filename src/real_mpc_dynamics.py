@@ -169,7 +169,8 @@ class MPCAgent:
         self.multi = multi
 
     def mpc_action(self, state, init, goal, state_range, action_range, swarm=False, n_steps=10, n_samples=1000,
-                   swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1):
+                   swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1,
+                   which=-1):
         state, init, goal = to_tensor(state, init, goal)
         self.state = state      # for multi-robot (swarming)
         all_actions = torch.empty(n_steps, n_samples, 2).uniform_(-0.99, 0.99)
@@ -186,7 +187,17 @@ class MPCAgent:
         for i in range(n_steps):
             actions = all_actions[i]
             with torch.no_grad():
-                states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
+                if self.multi:
+                    if which == 0:
+                        ids = torch.stack((torch.ones(len(states)), torch.zeros(len(states))), dim=1)
+                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
+                    elif which == 2:
+                        ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
+                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
+                    else:
+                        raise ValueError
+                else:
+                    states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
 
             # heading computations
             x0, y0, current_angle = states.T
