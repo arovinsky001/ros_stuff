@@ -62,12 +62,12 @@ class DynamicsNetwork(nn.Module):
         self.multi = multi
         self.input_scaler = None
         self.output_scaler = None
-        self._init_weights()
+        self.model.apply(self._init_weights)
 
-    def _init_weights(self):
-        if isinstance(self.model, nn.Linear):
-            torch.nn.init.xavier_uniform_(self.model.weight)
-            self.model.bias.data.fill_(0.01)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            m.bias.data.fill_(0.01)
 
     def forward(self, state, action, id=None):
         if self.multi:
@@ -348,9 +348,9 @@ class MPCAgent:
         if self.scale:
             train_states, train_actions = self.model.get_scaled(train_states, train_actions)
             train_states_delta = self.model.get_scaled(train_states_delta)
-            # train_states += np.random.normal(0.0, 0.05, size=train_states.shape)
-            # train_actions += np.random.normal(0.0, 0.05, size=train_actions.shape)
-            # train_next_states += np.random.normal(0.0, 0.05, size=train_next_states.shape)
+            # train_states += np.random.normal(0.0, 0.001, size=train_states.shape)
+            # train_actions += np.random.normal(0.0, 0.001, size=train_actions.shape)
+            # train_next_states += np.random.normal(0.0, 0.001, size=train_next_states.shape)
 
         train_states, train_actions, train_states_delta = to_tensor(train_states, train_actions, train_states_delta)
         test_states, test_actions, test_states_delta = to_tensor(test_states, test_actions, test_states_delta)
