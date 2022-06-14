@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import numpy as np
 import pickle as pkl
 import matplotlib.pyplot as plt
+from requests import head
 
 import rospy
 from ar_track_alvar_msgs.msg import AlvarMarkers
@@ -15,7 +17,9 @@ from real_mpc_dynamics import *
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online.npz"
 
 class RealMPC:
-    def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples):
+    def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples, model):
+        self.model = model
+        self.n = n
         self.step_count = 1
         self.flat_count = 0
         self.n_updates = 0
@@ -27,6 +31,11 @@ class RealMPC:
         self.states = []
         self.actions = []
         self.next_states = []
+        self.steps_to_goal = []
+        self.heading_losses = []
+        self.perp_losses = []
+        self.heading_losses_total = []
+        self.perp_losses_total = []
 
         self.robot_ids = np.array(robot_ids)
         self.agents = []
@@ -123,8 +132,24 @@ class RealMPC:
         self.dists.append(distances)
         self.dones[distances < self.tol] = True
         
+        path = "/home/bvanbuskirk/MPCDynamicsKamigami/sim/data/loss/"
         if np.all(self.dones) or self.step_count % 40 == 0:
             if self.done_count == len(self.goals) - 1:
+                steps_to_goal = np.array(self.steps_to_goal)
+                perp_losses = np.array(self.perp_losses_total)
+                heading_losses = np.array(self.heading_losses_total)
+
+                steps_to_goal = steps_to_goal.reshape(-1, 4).sum(axis=-1).mean()
+                perp_losses = perp_losses.reshape(-1, 4).sum(axis=-1).mean()
+                heading_losses = heading_losses.reshape(-1, 4).sum(axis=-1).mean()
+                data = np.array([steps_to_goal, perp_losses, heading_losses])
+
+                np.save(path + f"robot{self.robot_ids[0]}_{self.model}", data)
+
+                print("steps to goal:", steps_to_goal)
+                print("perp losses:", perp_losses)
+                print("heading losses", heading_losses)
+
                 plt.plot(np.arange(len(self.dists)), self.dists, "b-")
                 plt.xlabel("Step")
                 plt.ylabel("Distance to Goal")
@@ -132,6 +157,12 @@ class RealMPC:
                 plt.show()
                 rospy.signal_shutdown("Finished! All robots reached goal.")
             else:
+                self.steps_to_goal.append(self.step_count)
+                self.heading_losses_total.append(np.sum(self.heading_losses))
+                self.perp_losses_total.append(np.sum(self.perp_losses))
+                self.heading_losses = []
+                self.perp_losses = []
+
                 for i in range(len(self.dones)):
                     self.dones[i] = False
                 self.done_count += 1
@@ -143,13 +174,7 @@ class RealMPC:
 
         for i, agent in enumerate(self.agents):
             if not self.dones[i]:
-                # norm_weight = 0.1 if distances > 0.3 else 0.02
-                # swarm_weight = 0.0
-                # perp_weight = 0.5
-                # heading_weight = 0.3
-                # forward_weight = 0.0
-                # dist_weight = 1.5
-                # norm_weight = 0.1
+                which = 0 if self.model == "joint0" else 2
 
                 # for actions with duration
                 swarm_weight = 0.0
@@ -158,15 +183,14 @@ class RealMPC:
                 forward_weight = 0.0
                 dist_weight = 1.0
                 norm_weight = 0.0
-                action = agent.mpc_action(states[i], self.init_states[i], self.goal,
+                action, dist, heading, perp = agent.mpc_action(states[i], self.init_states[i], self.goal,
                                         self.state_range, self.action_range, swarm=False, n_steps=self.mpc_steps,
                                         n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
                                         heading_weight=heading_weight, forward_weight=forward_weight,
-                                        dist_weight=dist_weight, norm_weight=norm_weight).detach().numpy()
+                                        dist_weight=dist_weight, norm_weight=norm_weight, which=which).detach().numpy()
                 
                 action += np.random.normal(0.0, 0.005, size=action.shape)
-                action = np.clip(action, [-0.99, -0.99, 0.001], [0.99, 0.99, 5])
-                # action[:-1] = np.clip(action[:-1], -0.99, 0.99)
+                action = np.clip(action, [-0.999, -0.999, 0.001], [0.999, 0.999, 5])
 
                 action_req = RobotCmd()
                 action_req.left_pwm = action[0]
@@ -175,6 +199,9 @@ class RealMPC:
                 print("\nACTION:", action)
                 print("STATE:", states[i], '\n')
                 self.command_action(action_req, f"kami{self.robot_ids[i]}")
+
+                self.heading_losses.append(heading)
+                self.perp_losses.append(perp)
 
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
@@ -232,9 +259,9 @@ class RealMPC:
 
         if clip_end:
             clip = 3
-            states = states[:-3]
-            actions = actions[:-3]
-            next_states = next_states[:-3]
+            states = states[:-clip]
+            actions = actions[:-clip]
+            next_states = next_states[:-clip]
             if len(states) == 0:
                 print("No new states to append!")
                 return
@@ -270,7 +297,12 @@ class RealMPC:
 
 
 if __name__ == '__main__':
-    robot_ids = [2]
+    parser = argparse.ArgumentParser(description='Do MPC.')
+    parser.add_argument('-robot_ids', nargs='+', help='robot ids for rollout', type=int)
+    parser.add_argument('-model', type=str, help='model to use for experiment')
+    
+    args = parser.parse_args()
+
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
     # agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real_AMAZING_kami1.pkl"
 
@@ -283,11 +315,13 @@ if __name__ == '__main__':
                       [-0.5, -0.9, 0.0],
                       [-1.4, -0.9, 0.0],
                       [-1.4, 0.0, 0.0]])
+    
+    goals = np.tile(goals, (5, 1))
 
     # n_goals = 200
     # goals = np.random.uniform(low=[-1.4, -1.0], high=[-0.4, 0.0], size=(n_goals, 2))
     # goals = np.append(goals, np.tile(np.array([0., 1.]), (n_goals, 1)), axis=-1)
 
     mpc_steps = 2
-    mpc_samples = 1000
-    r = RealMPC(robot_ids, agent_path, goals, mpc_steps, mpc_samples)
+    mpc_samples = 500
+    r = RealMPC(args.robot_ids, agent_path, goals, mpc_steps, mpc_samples, args.model)
