@@ -19,11 +19,11 @@ class RealMPC:
         self.step_count = 1
         self.flat_count = 0
         self.n_updates = 0
-        self.n_avg_states = 2
-        self.n_wait_updates = 2
+        self.n_avg_states = 1
+        self.n_wait_updates = 1
         self.flat_lim = 0.6
         self.online = True
-        # self.online = False
+        self.online = False
         self.states = []
         self.actions = []
         self.next_states = []
@@ -38,7 +38,7 @@ class RealMPC:
         self.current_states = np.zeros((len(robot_ids), 3))
         self.state_range = np.array([-np.inf, np.inf])
         action = 0.99
-        self.action_range = np.array([[-action, -action, 0.05], [action, action, 0.6]])
+        self.action_range = np.array([[-action, -action, 0.1], [action, action, 0.6]])
         self.mpc_steps = mpc_steps
         self.mpc_samples = mpc_samples
         self.dists = []
@@ -50,7 +50,7 @@ class RealMPC:
 
         # Get info on positioning from camera & AR tags
         print("waiting for service")
-        rospy.wait_for_service('/kami2/server')
+        rospy.wait_for_service(f'/kami{robot_ids[0]}/server')
         self.command_action = rospy.ServiceProxy(f'/kami{robot_ids[0]}/server', CommandAction)
         print("service loaded")
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
@@ -206,21 +206,24 @@ class RealMPC:
             # self.agents[0].model.update(states, action[None, :], next_states)
     
     def get_states(self):
-        current_states = []
-        n_updates = self.n_updates
-        while len(current_states) < self.n_avg_states:
-            if self.n_updates == n_updates:
-                continue
+        if self.n_avg_states > 1:
+            current_states = []
             n_updates = self.n_updates
-            current_states.append(self.current_states.copy())
-        
-        current_states = np.array(current_states).squeeze()
-        if len(current_states.shape) == 2:
-            current_states = current_states.mean(axis=0, keepdims=True)
-        else:
-            current_states = current_states.mean(axis=1)
+            while len(current_states) < self.n_avg_states:
+                if self.n_updates == n_updates:
+                    continue
+                n_updates = self.n_updates
+                current_states.append(self.current_states.copy())
+            
+            current_states = np.array(current_states).squeeze()
+            if len(current_states.shape) == 2:
+                current_states = current_states.mean(axis=0, keepdims=True)
+            else:
+                current_states = current_states.mean(axis=1)
 
-        return current_states
+            return current_states
+        else:
+            return self.current_states.copy()
     
     def save_data(self, clip_end=False):
         states = np.array(self.states)
@@ -277,8 +280,8 @@ if __name__ == '__main__':
     #                   [-1.0,  -0.9, 0.0, 1.0]])
 
     goals = np.array([[-0.5, 0.0, 0.0],
-                      [-0.5, -1.0, 0.0],
-                      [-1.4, -1.0, 0.0],
+                      [-0.5, -0.9, 0.0],
+                      [-1.4, -0.9, 0.0],
                       [-1.4, 0.0, 0.0]])
 
     # n_goals = 200
@@ -286,5 +289,5 @@ if __name__ == '__main__':
     # goals = np.append(goals, np.tile(np.array([0., 1.]), (n_goals, 1)), axis=-1)
 
     mpc_steps = 2
-    mpc_samples = 500
+    mpc_samples = 1000
     r = RealMPC(robot_ids, agent_path, goals, mpc_steps, mpc_samples)
