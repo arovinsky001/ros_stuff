@@ -168,13 +168,12 @@ class MPCAgent:
         self.scale = scale
         self.multi = multi
 
-    def mpc_action(self, state, init, goal, state_range, action_range, swarm=False, n_steps=10, n_samples=1000,
+    def mpc_action(self, state, init, goal, action_range, swarm=False, n_steps=10, n_samples=1000,
                    swarm_weight=0.0, perp_weight=0.4, heading_weight=0.17, forward_weight=0.0, dist_weight=1.0, norm_weight=0.1,
                    which=-1):
-        state, init, goal = to_tensor(state, init, goal)
+        all_actions = np.random.uniform(*action_range, size=(n_steps, n_samples, action_range.shape[-1]))
+        state, init, goal, all_actions = to_tensor(state, init, goal, all_actions)
         self.state = state      # for multi-robot (swarming)
-        all_actions = torch.empty(n_steps, n_samples, 2).uniform_(-0.99, 0.99)
-        all_actions = torch.cat((all_actions, torch.empty(n_steps, n_samples, 1).uniform_(0.05, 0.6)), dim=-1)
         states = torch.tile(state, (n_samples, 1))
         goals = torch.tile(goal, (n_samples, 1))
         x1, y1, _ = init
@@ -184,36 +183,7 @@ class MPCAgent:
         perp_denom = vec_to_goal.norm()
         all_losses = torch.empty(n_steps, n_samples)
 
-        # heading computations
-        x0, y0, current_angle = states.T
-        vecs_to_goal = (goals - states)[:, :2]
-        target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
-        target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
-        angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
-        angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
-        angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
-        angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
-        
-        # compute losses
-        dist_loss_init = torch.norm((goals - states)[:, :2], dim=-1).squeeze().mean()
-        heading_loss_init = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze().mean()
-        perp_loss_init = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze().mean()
-
-        for i in range(n_steps):
-            actions = all_actions[i]
-            with torch.no_grad():
-                if self.multi:
-                    if which == 0:
-                        ids = torch.stack((torch.ones(len(states)), torch.zeros(len(states))), dim=1)
-                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
-                    elif which == 2:
-                        ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
-                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
-                    else:
-                        raise ValueError
-                else:
-                    states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
-
+        def compute_losses(states, init=False):
             # heading computations
             x0, y0, current_angle = states.T
             vecs_to_goal = (goals - states)[:, :2]
@@ -226,17 +196,43 @@ class MPCAgent:
             
             # compute losses
             dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
-            norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
-            # dist_loss[dist_loss < 0.15] *= 0.2
             heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze()
             perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
-            forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
-            norm_loss = -all_actions[i, :, :-1].norm(dim=-1).squeeze() if i == 0 else 0.0
-            swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
+            if not init:
+                forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
+                norm_loss = -actions[:, :-1].norm(dim=-1).squeeze()
+                swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
+                norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
+
+                return dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const
+            return dist_loss, heading_loss, perp_loss
+        
+        dist_loss_init, heading_loss_init, perp_loss_init = compute_losses(states, init=True)
+
+        for i in range(n_steps):
+            actions = all_actions[i]
+            with torch.no_grad():
+                states[:, -1] %= 2 * torch.pi
+                if self.multi:
+                    if which == 0:
+                        print("JOINT 0")
+                        ids = torch.stack((torch.ones(len(states)), torch.zeros(len(states))), dim=1)
+                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
+                    elif which == 2:
+                        print("JOINT 1")
+                        ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
+                        states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
+                    else:
+                        raise ValueError
+                else:
+                    states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
+   
+            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = compute_losses(states)
 
             print(f"heading: {(norm_const * heading_weight * heading_loss).mean()}")
             print(f"perp: {(norm_const * perp_weight * perp_loss).mean()}")
             print(f"dist: {(dist_weight * dist_loss).mean()}")
+            print(f"forward: {(forward_weight * forward_loss).mean()}")
 
             # normalize appropriate losses and compute total loss
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \

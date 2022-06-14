@@ -19,7 +19,6 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_on
 class RealMPC:
     def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples, model):
         self.model = model
-        self.n = n
         self.step_count = 1
         self.flat_count = 0
         self.n_updates = 0
@@ -45,7 +44,6 @@ class RealMPC:
         self.tol = 0.08
         self.dones = np.array([False] * len(robot_ids))
         self.current_states = np.zeros((len(robot_ids), 3))
-        self.state_range = np.array([-np.inf, np.inf])
         action = 0.99
         self.action_range = np.array([[-action, -action, 0.1], [action, action, 0.6]])
         self.mpc_steps = mpc_steps
@@ -132,23 +130,31 @@ class RealMPC:
         self.dists.append(distances)
         self.dones[distances < self.tol] = True
         
-        path = "/home/bvanbuskirk/MPCDynamicsKamigami/sim/data/loss/"
+        path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/loss/"
         if np.all(self.dones) or self.step_count % 40 == 0:
+            self.steps_to_goal.append(self.step_count)
+            self.heading_losses_total.append(np.sum(self.heading_losses))
+            self.perp_losses_total.append(np.sum(self.perp_losses))
+            self.heading_losses = []
+            self.perp_losses = []
             if self.done_count == len(self.goals) - 1:
                 steps_to_goal = np.array(self.steps_to_goal)
                 perp_losses = np.array(self.perp_losses_total)
                 heading_losses = np.array(self.heading_losses_total)
 
-                steps_to_goal = steps_to_goal.reshape(-1, 4).sum(axis=-1).mean()
-                perp_losses = perp_losses.reshape(-1, 4).sum(axis=-1).mean()
-                heading_losses = heading_losses.reshape(-1, 4).sum(axis=-1).mean()
-                data = np.array([steps_to_goal, perp_losses, heading_losses])
+                steps_to_goal = steps_to_goal.reshape(-1, 4).sum(axis=-1)
+                perp_losses = perp_losses.reshape(-1, 4).sum(axis=-1)
+                heading_losses = heading_losses.reshape(-1, 4).sum(axis=-1)
+                
+                assert len(steps_to_goal) == len(perp_losses) == len(heading_losses) == len(self.goals) / 4
+                data = np.array([[steps_to_goal.mean(), steps_to_goal.std()],
+                                 [perp_losses.mean(), perp_losses.std()],
+                                 [heading_losses.mean(), heading_losses.std()]])
 
                 np.save(path + f"robot{self.robot_ids[0]}_{self.model}", data)
 
-                print("steps to goal:", steps_to_goal)
-                print("perp losses:", perp_losses)
-                print("heading losses", heading_losses)
+                print("(steps, perp, heading)")
+                print("DATA:", data, "\n")
 
                 plt.plot(np.arange(len(self.dists)), self.dists, "b-")
                 plt.xlabel("Step")
@@ -157,12 +163,6 @@ class RealMPC:
                 plt.show()
                 rospy.signal_shutdown("Finished! All robots reached goal.")
             else:
-                self.steps_to_goal.append(self.step_count)
-                self.heading_losses_total.append(np.sum(self.heading_losses))
-                self.perp_losses_total.append(np.sum(self.perp_losses))
-                self.heading_losses = []
-                self.perp_losses = []
-
                 for i in range(len(self.dones)):
                     self.dones[i] = False
                 self.done_count += 1
@@ -184,11 +184,16 @@ class RealMPC:
                 dist_weight = 1.0
                 norm_weight = 0.0
                 action, dist, heading, perp = agent.mpc_action(states[i], self.init_states[i], self.goal,
-                                        self.state_range, self.action_range, swarm=False, n_steps=self.mpc_steps,
+                                        self.action_range, swarm=False, n_steps=self.mpc_steps,
                                         n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
                                         heading_weight=heading_weight, forward_weight=forward_weight,
-                                        dist_weight=dist_weight, norm_weight=norm_weight, which=which).detach().numpy()
+                                        dist_weight=dist_weight, norm_weight=norm_weight, which=which)
                 
+                action = action.detach().numpy()
+                dist = dist.detach().numpy()
+                heading = heading.detach().numpy()
+                perp = perp.detach().numpy()
+
                 action += np.random.normal(0.0, 0.005, size=action.shape)
                 action = np.clip(action, [-0.999, -0.999, 0.001], [0.999, 0.999, 5])
 
@@ -300,7 +305,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Do MPC.')
     parser.add_argument('-robot_ids', nargs='+', help='robot ids for rollout', type=int)
     parser.add_argument('-model', type=str, help='model to use for experiment')
-    
+    parser.add_argument('-mpc_steps', type=int)
+    parser.add_argument('-mpc_samples', type=int)
+
     args = parser.parse_args()
 
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
@@ -313,8 +320,8 @@ if __name__ == '__main__':
 
     goals = np.array([[-0.5, 0.0, 0.0],
                       [-0.5, -0.9, 0.0],
-                      [-1.4, -0.9, 0.0],
-                      [-1.4, 0.0, 0.0]])
+                      [-1.3, -0.9, 0.0],
+                      [-1.3, 0.0, 0.0]])
     
     goals = np.tile(goals, (5, 1))
 
@@ -322,6 +329,4 @@ if __name__ == '__main__':
     # goals = np.random.uniform(low=[-1.4, -1.0], high=[-0.4, 0.0], size=(n_goals, 2))
     # goals = np.append(goals, np.tile(np.array([0., 1.]), (n_goals, 1)), axis=-1)
 
-    mpc_steps = 2
-    mpc_samples = 500
-    r = RealMPC(args.robot_ids, agent_path, goals, mpc_steps, mpc_samples, args.model)
+    r = RealMPC(args.robot_ids, agent_path, goals, args.mpc_steps, args.mpc_samples, args.model)
