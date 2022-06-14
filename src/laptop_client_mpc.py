@@ -34,8 +34,8 @@ class RealMPC:
         self.goal = goals[0]
         self.done_count = 0
         self.tol = 0.08
-        self.dones = np.array([False] * len(kami_ids))
-        self.current_states = np.zeros((len(kami_ids), 3))
+        self.dones = np.array([False] * len(robot_ids))
+        self.current_states = np.zeros((len(robot_ids), 3))
         self.state_range = np.array([-np.inf, np.inf])
         action = 0.99
         self.action_range = np.array([[-action, -action, 0.05], [action, action, 0.6]])
@@ -51,7 +51,7 @@ class RealMPC:
         # Get info on positioning from camera & AR tags
         print("waiting for service")
         rospy.wait_for_service('/kami2/server')
-        self.command_action = rospy.ServiceProxy(f'/kami{kami_ids[0]}/server', CommandAction)
+        self.command_action = rospy.ServiceProxy(f'/kami{robot_ids[0]}/server', CommandAction)
         print("service loaded")
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
 
@@ -248,14 +248,16 @@ class RealMPC:
             try:
                 print("\nAppending new data to old data!")
                 data = np.load(SAVE_PATH)
+                old_ids = np.copy(data["ids"])
                 old_states = np.copy(data["states"])
                 old_actions = np.copy(data["actions"])
                 old_next_states = np.copy(data["next_states"])
                 if len(old_states) != 0 and len(old_actions) != 0:
+                    ids = np.append(old_ids, np.ones(len(states)), axis=0)
                     states = np.append(old_states, states, axis=0)
                     actions = np.append(old_actions, actions, axis=0)
                     next_states = np.append(old_next_states, next_states, axis=0)
-                np.savez_compressed(SAVE_PATH, states=states, actions=actions, next_states=next_states)
+                np.savez_compressed(SAVE_PATH, states=states, actions=actions, next_states=next_states, ids=ids)
             except:
                 import pdb;pdb.set_trace()
         self.states = []
@@ -265,8 +267,9 @@ class RealMPC:
 
 
 if __name__ == '__main__':
-    kami_ids = [1]
+    robot_ids = [2]
     agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real.pkl"
+    # agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real_AMAZING_kami1.pkl"
 
     # goals = np.array([[-1.0,  -0.9, 0.0, 1.0],
     #                   [-1.4, -0.2, 0.0, 1.0],

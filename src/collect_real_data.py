@@ -15,7 +15,7 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.np
 class DataCollector:
     def __init__(self):
         self.action_range = np.array([[-0.99, -0.99, 0.05], [0.99, 0.99, 0.6]])
-        self.robot_ids = [0, 1]
+        self.robot_ids = np.array([0, 2])
 
         self.n_avg_states = 2
         self.n_wait_updates = 2
@@ -34,8 +34,10 @@ class DataCollector:
         
         rospy.init_node("data_collector")
         print("waiting for service")
-        rospy.wait_for_service("/kami1/server")
-        self.command_action = rospy.ServiceProxy("/kami1/server", CommandAction)
+        self.service_proxies = []
+        for id in self.robot_ids:
+            rospy.wait_for_service(f"/kami{id}/server")
+            self.service_proxies.append(rospy.ServiceProxy(f"/kami{id}/server", CommandAction))
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
         while not rospy.is_shutdown():
             self.collect_data()
@@ -45,14 +47,12 @@ class DataCollector:
             found_robot = False
             for marker in msg.markers:
                 if marker.id in self.robot_ids:
-                    idx = np.argwhere(self.robot_ids == marker.id)
-                    if self.dones[idx]:
-                        continue
+                    idx = np.argwhere(self.robot_ids == marker.id).squeeze().item()
                     state = self.current_states[idx]
                     found_robot = True
                 else:
                     continue
-                
+                                
                 o = marker.pose.pose.orientation
                 o_list = [o.x, o.y, o.z, o.w]
                 x, y, z = euler_from_quaternion(o_list)
@@ -98,7 +98,7 @@ class DataCollector:
         self.next_states.append(next_states)
         self.step_count += 1
         
-        if self.step_count % 5 == 0:
+        if self.step_count % 2 == 0:
             self.save_data()
     
     def get_states(self):
@@ -130,10 +130,8 @@ class DataCollector:
         
         current_states = np.array(current_states).squeeze()
         
-        if len(current_states.shape) == 2:
-            current_states = current_states.mean(axis=0, keepdims=True)
-        else:
-            current_states = current_states.mean(axis=1)
+        keepdims = (len(current_states.shape) == 2)
+        current_states = current_states.mean(axis=0, keepdims=keepdims)
 
         return current_states
     
@@ -146,8 +144,7 @@ class DataCollector:
             req.duration = actions[i, 2]
         
         for i, proxy in enumerate(self.service_proxies):
-            proxy(reqs[i], f'kami{i}')
-            # self.command_action(action_req, 'kami1')
+            proxy(reqs[i], f'kami{i+1}')
 
         n_updates = self.n_updates
         i = 0
