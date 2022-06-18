@@ -187,8 +187,11 @@ class MPCAgent:
             # heading computations
             x0, y0, current_angle = states.T
             vecs_to_goal = (goals - states)[:, :2]
+            # vecs_to_goal = torch.tile(vec_to_goal, (len(states), 1))
             target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
             target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
+            current_angle1 = current_angle
+            current_angle2 = (current_angle + torch.pi) % (2 * torch.pi)
             angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
             angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
             angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
@@ -202,7 +205,9 @@ class MPCAgent:
                 forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
                 norm_loss = -actions[:, :-1].norm(dim=-1).squeeze()
                 swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
-                norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
+                norm_const = dist_loss.mean()
+                # norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
+                # norm_const = 1
 
                 return dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const
             return dist_loss, heading_loss, perp_loss
@@ -219,12 +224,13 @@ class MPCAgent:
                         ids = torch.stack((torch.ones(len(states)), torch.zeros(len(states))), dim=1)
                         states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
                     elif which == 2:
-                        print("JOINT 1")
+                        print("JOINT 2")
                         ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
                         states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
                     else:
                         raise ValueError
                 else:
+                    print("SINGLE")
                     states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
    
             dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = compute_losses(states)
@@ -279,6 +285,7 @@ class MPCAgent:
 
         states_sc = torch.cat([states_xy[:, :-1], sc], dim=-1)
         next_states_sc = states_sc + states_delta
+        # next_states_sc[:, 2:] = torch.clamp(next_states_sc[:, 2:], min=-0.9999999, max=0.9999999)
         n_thetas = torch.atan2(next_states_sc[:, 2], next_states_sc[:, 3]).reshape(-1, 1)
         next_states = torch.cat([next_states_sc[:, :2], n_thetas], dim=-1)
         next_states = dcn(next_states)
