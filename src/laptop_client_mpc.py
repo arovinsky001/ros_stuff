@@ -18,6 +18,18 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_on
 
 class RealMPC:
     def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples, model, n_rollouts):
+        self.front_left_corner = np.array([-0.3, -0.9])
+        self.back_right_corner = np.array([-1.5, 0.1])
+        range = self.back_right_corner - self.front_left_corner
+
+        back_circle_center_rel = np.array([0.5, 0.72])
+        front_circle_center_rel = np.array([0.5, 0.26])
+        radius_rel = 0.23
+
+        self.back_circle_center = back_circle_center_rel * range
+        self.front_circle_center = front_circle_center_rel * range
+        self.radius = np.abs(range).mean() * radius_rel
+        
         self.n_rollouts = n_rollouts
         self.model = model
         self.step_count = 1
@@ -25,6 +37,7 @@ class RealMPC:
         self.n_avg_states = 4
         self.n_wait_updates = 4
         self.flat_lim = 0.6
+        self.trajectory_seconds = 80
         # self.collect_data = True
         self.collect_data = False
         self.states = []
@@ -64,6 +77,8 @@ class RealMPC:
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
 
         self.time = rospy.get_time()
+        self.start_time = rospy.get_time()
+
         while not rospy.is_shutdown():
             self.run()
 
@@ -186,7 +201,7 @@ class RealMPC:
                 forward_weight = 0.0
                 dist_weight = 0.8
                 norm_weight = 0.0
-                action, dist, heading, perp = agent.mpc_action(states[i], self.init_states[i], self.goal,
+                action, dist, heading, perp = agent.mpc_action(states[i], self.init_states[i], self.get_goal(),
                                         self.action_range, swarm=False, n_steps=self.mpc_steps,
                                         n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
                                         heading_weight=heading_weight, forward_weight=forward_weight,
@@ -268,7 +283,25 @@ class RealMPC:
             return current_states
         else:
             return self.current_states.copy()
-    
+
+    def get_goal(self):
+        t = rospy.get_time()
+        t_rel = ((t - self.start_time) % self.trajectory_seconds) / self.trajectory_seconds
+
+        if t_rel < 0.25:
+            theta = 2 * np.pi * t_rel / 0.5
+            center = self.back_circle_center
+        elif 0.25 <= t_rel < 0.75:
+            theta = -2 * np.pi * (t_rel - 0.25) / 0.5
+            center = self.front_circle_center
+        else:
+            theta = 2 * np.pi * (t_rel - 0.5) / 0.5
+            center = self.back_circle_center
+        
+        goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
+
+        return np.append(goal, 0., axis=0)
+            
     def save_data(self, clip_end=False):
         states = np.array(self.states)
         actions = np.array(self.actions)
