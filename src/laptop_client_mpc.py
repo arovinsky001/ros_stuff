@@ -18,17 +18,21 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_on
 
 class RealMPC:
     def __init__(self, robot_ids, agent_path, goals, mpc_steps, mpc_samples, model, n_rollouts):
-        self.front_left_corner = np.array([-0.3, -0.9])
-        self.back_right_corner = np.array([-1.5, 0.1])
+        self.front_left_corner = np.array([-0.4, -0.9])
+        self.back_right_corner = np.array([-1.4, 0.1])
         range = self.back_right_corner - self.front_left_corner
 
-        back_circle_center_rel = np.array([0.5, 0.72])
-        front_circle_center_rel = np.array([0.5, 0.26])
-        radius_rel = 0.23
-
-        self.back_circle_center = back_circle_center_rel * range
-        self.front_circle_center = front_circle_center_rel * range
+        radius_rel = 0.3
+        back_circle_center_rel = np.array([0.38, 0.65])
+        front_circle_center_rel = np.array([0.74, 0.3])
+        
+        self.back_circle_center = back_circle_center_rel * range + self.front_left_corner
+        self.front_circle_center = front_circle_center_rel * range + + self.front_left_corner
         self.radius = np.abs(range).mean() * radius_rel
+        self.trajectory_seconds = 40
+        self.last_goal = self.back_circle_center + np.array([0.0, 1.0]) * self.radius
+        self.last_goal = np.block([self.last_goal, 0.0])
+        self.all_goals = []
         
         self.n_rollouts = n_rollouts
         self.model = model
@@ -37,7 +41,6 @@ class RealMPC:
         self.n_avg_states = 4
         self.n_wait_updates = 4
         self.flat_lim = 0.6
-        self.trajectory_seconds = 80
         # self.collect_data = True
         self.collect_data = False
         self.states = []
@@ -54,12 +57,12 @@ class RealMPC:
         self.agents = []
         self.goals = goals
         self.goal = goals[0]
-        self.done_count = 0
-        self.tol = 0.06
+        self.laps = 0
+        self.tol = 0.05
         self.dones = np.array([False] * len(robot_ids))
         self.current_states = np.zeros((len(robot_ids), 3))
         action = 0.99
-        self.action_range = np.array([[-action, -action, 0.1], [action, action, 0.5]])
+        self.action_range = np.array([[-action, -action, 0.1], [action, action, 0.6]])
         self.mpc_steps = mpc_steps
         self.mpc_samples = mpc_samples
         self.dists = []
@@ -76,11 +79,31 @@ class RealMPC:
         print("service loaded")
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
 
-        self.time = rospy.get_time()
+        self.init_goal = self.get_goal(init=True)
+        while self.dist_to_start() > self.tol:
+            print(f"DISTANCE TO STARTING POSITION: {self.dist_to_start()}")
+            rospy.sleep(0.5)
         self.start_time = rospy.get_time()
 
+        self.time = rospy.get_time()
+        all_goals = None
+        while self.n_updates == 0:
+            print("WAITING FOR AR TRACKING UPDATES")
+            rospy.sleep(0.1)
+
+        self.init_states = self.get_states()
         while not rospy.is_shutdown():
-            self.run()
+            end = self.run()
+            if end:
+                return
+
+            if rospy.get_time() - self.start_time > self.trajectory_seconds + 3 and all_goals is None:
+                all_goals = np.array(self.all_goals)
+                plt.plot(all_goals[:, 0], all_goals[:, 1])
+                plt.show()
+            
+            # if self.dist_to_start() < self.tol:
+            #     self.start_time = rospy.get_time()
 
     def update_state(self, msg):
         try:
@@ -120,31 +143,32 @@ class RealMPC:
         except:
             print(f"could not update states, id: {marker.id}")
             import pdb;pdb.set_trace()
-        
+
+    def dist_to_start(self):
+        return np.linalg.norm((self.get_states().squeeze() - self.init_goal)[:2])
 
     def run(self):
-        if self.n_updates == 0:
-            return
+        if rospy.get_time() - self.start_time > 10 and self.dist_to_start() < self.tol:
+            self.start_time = rospy.get_time()
+            self.laps += 1
 
-        states = self.get_states()
-
-        if not hasattr(self, "init_states"):
-            self.init_states = states
-
-        diff = self.goal - states
-        distances = np.linalg.norm(diff[:, :2], axis=-1).squeeze()
-        print("DISTANCES:", distances)
-        self.dists.append(distances)
-        self.dones[distances < self.tol] = True
+        # diff = self.goal - states
+        # distances = np.linalg.norm(diff[:, :2], axis=-1).squeeze()
+        # print("DISTANCES:", distances)
+        # self.dists.append(distances)
+        # self.dones[distances < self.tol] = True
         
         path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/loss/"
-        if np.all(self.dones) or self.step_count % 40 == 0:
+        # if np.all(self.dones) or self.step_count % 40 == 0:
+        if self.laps == self.n_rollouts:
             self.steps_to_goal.append(self.step_count)
             self.times_to_goal.append(rospy.get_time() - self.time)
             self.heading_losses_total.append(np.sum(self.heading_losses))
             self.perp_losses_total.append(np.sum(self.perp_losses))
             self.heading_losses = []
             self.perp_losses = []
+
+
             if self.done_count == len(self.goals) - 1:
                 steps_to_goal = np.array(self.steps_to_goal)
                 times_to_goal = np.array(self.times_to_goal)
@@ -184,6 +208,8 @@ class RealMPC:
                 self.step_count = 1
                 self.time = rospy.get_time()
                 return
+        
+        states = self.get_states()
 
         for i, agent in enumerate(self.agents):
             if not self.dones[i]:
@@ -196,16 +222,19 @@ class RealMPC:
 
                 # for actions with duration
                 swarm_weight = 0.0
-                perp_weight = 1.7
-                heading_weight = 0.7
+                perp_weight = 0.0
+                heading_weight = 0.0
                 forward_weight = 0.0
-                dist_weight = 0.8
+                dist_weight = 1.0
                 norm_weight = 0.0
-                action, dist, heading, perp = agent.mpc_action(states[i], self.init_states[i], self.get_goal(),
+
+                goal = self.get_goal()
+                action, dist, heading, perp = agent.mpc_action(states[i], self.last_goal, goal,
                                         self.action_range, swarm=False, n_steps=self.mpc_steps,
                                         n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
                                         heading_weight=heading_weight, forward_weight=forward_weight,
                                         dist_weight=dist_weight, norm_weight=norm_weight, which=which)
+                self.last_goal = goal.copy()
                 
                 action = action.detach().numpy()
                 dist = dist.detach().numpy().squeeze()[0]
@@ -275,18 +304,20 @@ class RealMPC:
                 current_states.append(self.current_states.copy())
             
             current_states = np.array(current_states).squeeze()
-            if len(current_states.shape) == 2:
-                current_states = current_states.mean(axis=0, keepdims=True)
-            else:
-                current_states = current_states.mean(axis=1)
+            
+            keepdims = (len(current_states.shape) == 2)
+            current_states = current_states.mean(axis=0, keepdims=keepdims)
 
             return current_states
         else:
-            return self.current_states.copy()
+            return self.current_states.copy().squeeze()
 
-    def get_goal(self):
+    def get_goal(self, init=False):
         t = rospy.get_time()
-        t_rel = ((t - self.start_time) % self.trajectory_seconds) / self.trajectory_seconds
+        if init:
+            t_rel = 0.
+        else:
+            t_rel = ((t - self.start_time) % self.trajectory_seconds) / self.trajectory_seconds
 
         if t_rel < 0.25:
             theta = 2 * np.pi * t_rel / 0.5
@@ -298,9 +329,13 @@ class RealMPC:
             theta = 2 * np.pi * (t_rel - 0.5) / 0.5
             center = self.back_circle_center
         
-        goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
+        theta += np.pi / 4
+        goal = center + np.array([np.sin(theta), np.cos(theta)]) * self.radius
+        
+        print("GOAL:", goal)
+        self.all_goals.append(goal)
 
-        return np.append(goal, 0., axis=0)
+        return np.block([goal, 0.0])
             
     def save_data(self, clip_end=False):
         states = np.array(self.states)
@@ -372,9 +407,10 @@ if __name__ == '__main__':
         agent_path += "real_single2_200.pkl"
     elif "400" in args.model:
         agent_path += "real_single2_400.pkl"
+    elif "amazing" in args.model:
+        agent_path += "real_AMAZING_kami1.pkl"
     else:
         raise ValueError
-    # agent_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/agents/real_AMAZING_kami1.pkl"
 
     # xgoals = np.linspace(-1.3, -0.5, 10)
     # ygoals = np.linspace(-0.9, 0.0, 10)
