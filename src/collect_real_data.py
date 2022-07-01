@@ -14,11 +14,12 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.np
 
 class DataCollector:
     def __init__(self):
-        self.action_range = np.array([[-0.99, -0.99, 0.1], [0.99, 0.99, 0.6]])
+        action = 0.99
+        self.action_range = np.array([[-action, -action, 0.1], [action, action, 0.6]])
         self.robot_ids = np.array([0, 2])
 
-        self.n_avg_states = 1
-        self.n_wait_updates = 1
+        self.n_avg_states = 4
+        self.n_wait_updates = 4
         self.max_perturb_count = 5
         self.n_clip = 3
         self.step_count = 0
@@ -34,10 +35,10 @@ class DataCollector:
         
         rospy.init_node("data_collector")
         print("waiting for service")
-        self.service_proxies = []
+        self.robot_proxies = []
         for id in self.robot_ids:
             rospy.wait_for_service(f"/kami{id}/server")
-            self.service_proxies.append(rospy.ServiceProxy(f"/kami{id}/server", CommandAction))
+            self.robot_proxies.append(rospy.ServiceProxy(f"/kami{id}/server", CommandAction))
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
         while not rospy.is_shutdown():
             self.collect_data()
@@ -90,6 +91,11 @@ class DataCollector:
         next_states = self.get_states()
         if next_states is None:
             return
+        
+        if np.linalg.norm((self.current_states[0] - self.current_states[1])[:-2]) < 0.23:
+            print("\nROBOTS TOO CLOSE TO EACH OTHER\n")
+            rospy.signal_shutdown("too close")
+            return
 
         print(f"\nstates:, {self.current_states}")
         print(f"actions: {actions}")
@@ -99,12 +105,12 @@ class DataCollector:
         self.next_states.append(next_states)
         self.step_count += 1
         
-        if self.step_count % 10 == 0:
+        if self.step_count % 5 == 0:
             self.save_data()
     
     def get_states(self):
         if self.perturb_count >= self.max_perturb_count:
-            print("\n\nRobot hit boundary!\n\n")
+            print("\n\nRobot hit boundary or angle is off! (get_states)\n\n")
             self.save_data(clip_end=True)
             rospy.signal_shutdown("bye")
             return None
@@ -118,10 +124,10 @@ class DataCollector:
                 req.right_pwm = -0.9
                 req.duration = 0.2
             
-            for i, proxy in enumerate(self.service_proxies):
+            for i, proxy in enumerate(self.robot_proxies):
                 proxy(reqs[i], f'kami{i+1}')
 
-            rospy.sleep(0.01)
+            rospy.sleep(0.1)
             self.perturb_count += 1
             return None
         
@@ -132,7 +138,7 @@ class DataCollector:
             n_updates = self.n_updates
             while len(current_states) < self.n_avg_states:
                 if self.n_updates == n_updates:
-                    continue
+                    rospy.sleep(0.001)
                 n_updates = self.n_updates
                 current_states.append(self.current_states.copy())
             
@@ -145,9 +151,6 @@ class DataCollector:
         else:
             return self.current_states.copy().squeeze()
 
-
-        
-    
     def get_command_actions(self):
         actions = np.random.uniform(*self.action_range, size=(len(self.robot_ids), self.action_range.shape[-1]))
         actions = np.append(actions, np.empty((len(self.robot_ids), 1)), axis=1)
@@ -158,18 +161,14 @@ class DataCollector:
             req.duration = actions[i, 2]
             actions[i, 3] = self.robot_ids[i]
         
-        for i, proxy in enumerate(self.service_proxies):
+        for i, proxy in enumerate(self.robot_proxies):
             proxy(reqs[i], f'kami{self.robot_ids[i]}')
 
         n_updates = self.n_updates
-        i = 0
         while self.n_updates - n_updates < self.n_wait_updates:
-            if i == 200:
-                print("DIDN'T UPDATE FOR TOO LONG")
-                import pdb;pdb.set_trace()
-            rospy.sleep(0.01)
-            i += 1
+            rospy.sleep(0.001)
 
+        self.perturb_count = 0
         return actions
     
     def save_data(self, clip_end=False):
