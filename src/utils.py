@@ -14,8 +14,8 @@ from tf.transformations import euler_from_quaternion
 
 class KamigamiInterface:
     def __init__(self, robot_ids, save_path):
-        self.robot_ids = robot_ids
         self.save_path = save_path
+        self.robot_ids = np.array(robot_ids)
 
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm, 0.1], [max_pwm, max_pwm, 0.6]])
@@ -31,8 +31,8 @@ class KamigamiInterface:
         self.n_updates = 0
         self.not_found = False
         
-        self.n_avg_states = 1
-        self.n_wait_updates = 1
+        self.n_avg_states = 4
+        self.n_wait_updates = 4
         self.max_perturb_count = 5
         self.n_clip = 3
         self.flat_lim = 0.6
@@ -43,7 +43,7 @@ class KamigamiInterface:
         self.next_states = []
         self.done = False
 
-        rospy.init_node("kamigami interface")
+        rospy.init_node("kamigami_interface")
 
         self.service_proxies = []
         for id in self.robot_ids:

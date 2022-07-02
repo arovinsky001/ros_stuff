@@ -182,10 +182,7 @@ class MPCAgent:
         perp_denom = vec_to_goal.norm()
         all_losses = torch.empty(n_steps, n_samples)
 
-        def compute_losses(states, init=False):
-            if init:
-                states = state[None, :]
-
+        def compute_losses(states, goals, init=False):
             # heading computations
             x0, y0, current_angle = states.T
             vecs_to_goal = (goals - states)[:, :2]
@@ -214,7 +211,7 @@ class MPCAgent:
 
             return dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const
         
-        dist_loss_init, heading_loss_init, perp_loss_init = compute_losses(None, init=True)
+        dist_loss_init, heading_loss_init, perp_loss_init = compute_losses(state[None, :], goal[None, :], init=True)
 
         for i in range(n_steps):
             actions = all_actions[i]
@@ -234,7 +231,7 @@ class MPCAgent:
                     print("SINGLE")
                     states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
    
-            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = compute_losses(states)
+            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = compute_losses(states, goals)
 
             print(f"heading: {(norm_const * heading_weight * heading_loss).mean()}")
             print(f"perp: {(norm_const * perp_weight * perp_loss).mean()}")
