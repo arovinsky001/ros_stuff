@@ -26,19 +26,25 @@ class RealMPC(KamigamiInterface):
         self.collect_data = collect_data
         self.robot_id = self.robot_ids[0]
 
+        # weights for MPC cost terms
+        self.swarm_weight = 0.0
+        self.perp_weight = 0.0
+        self.heading_weight = 0.0
+        self.forward_weight = 0.0
+        self.dist_weight = 1.0
+        self.norm_weight = 0.0
+
         self.plot_states = []
         self.plot_goals = []
 
-        self.dist_losses = []
-        self.heading_losses = []
-        self.perp_losses = []
+        buffer_size = 1000
+        self.stamped_losses = np.zeros(buffer_size, 5)      # timestamp, dist, heading, perp, total
+        self.losses = np.empty((0, 4))
 
-        self.dist_losses_total = []
-        self.heading_losses_total = []
-        self.perp_losses_total = []
-
+        self.time_elapsed = 0.
         self.logged_transitions = 0
         self.laps = 0
+        self.started = False
         
         with open(agent_path, "rb") as f:
             self.agent = pkl.load(f)
@@ -60,23 +66,39 @@ class RealMPC(KamigamiInterface):
         self.last_goal = self.back_circle_center + np.array([0.0, 1.0]) * self.radius
         self.last_goal = np.block([self.last_goal, 0.0])
     
-    def run(self):
-        self.init_goal = self.get_goal(init=True)
-        while self.dist_to_start() > self.tolerance:
-            print(f"DISTANCE TO STARTING POSITION: {self.dist_to_start()}")
-            rospy.sleep(0.5)
-        self.start_time = rospy.get_time()
+    def update_states(self, msg):
+        super().update_states(msg)
+        if self.not_found:
+            return
 
+        state = self.current_states.squeeze()
+        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, self.prev_goal, self.get_goal(), self.n_samples, logging=True)
+        total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
+        
+        self.losses[1:] = self.losses[:-1]
+        self.losses[0] = [rospy.get_time(), dist_loss, heading_loss, perp_loss, total_loss]
+
+        print("\nDIST:", dist_loss * self.dist_weight)
+        print("HEADING:", heading_loss * dist_loss * self.heading_weight)
+        print("PERP:", perp_loss * dist_loss * self.perp_weight, "\n")
+    
+    def run(self):
         while self.n_updates == 0:
             print("WAITING FOR FIRST AR TRACKING UPDATE")
             rospy.sleep(0.1)
 
         first_plot = True
+        self.time_elapsed = self.action_range[0, -1]
+        self.init_goal = self.get_goal()
         while not rospy.is_shutdown():
             self.step()
+
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
+            
+            if self.dist_to_start() < self.tolerance:
+                self.started = True
 
             plot_goals = np.array(self.plot_goals)
             plot_states = np.array(self.plot_states)
@@ -89,7 +111,6 @@ class RealMPC(KamigamiInterface):
                 first_plot = False
             plt.draw()
             plt.pause(0.001)
-            
 
     def dist_to_start(self):
         return np.linalg.norm((self.get_states().squeeze()[:-1] - self.init_goal)[:2])
@@ -99,7 +120,7 @@ class RealMPC(KamigamiInterface):
         action = self.get_take_actions(state[:-1])
 
         self.collect_training_data(state, action)
-        self.log_after_rollout()
+        self.check_rollout_finished()
     
     def get_take_actions(self, state):
         if self.model == "joint0":
@@ -108,28 +129,16 @@ class RealMPC(KamigamiInterface):
             which = 2
         else:
             which = None
-
-        # weights for MPC cost terms
-        swarm_weight = 0.0
-        perp_weight = 0.0
-        heading_weight = 0.0
-        forward_weight = 0.0
-        dist_weight = 1.0
-        norm_weight = 0.0
-
-        goal = self.get_goal()
-        action, dist, heading, perp = self.agent.mpc_action(state, self.last_goal, goal,
-                                self.action_range, swarm=False, n_steps=self.mpc_steps,
-                                n_samples=self.mpc_samples, swarm_weight=swarm_weight, perp_weight=perp_weight,
-                                heading_weight=heading_weight, forward_weight=forward_weight,
-                                dist_weight=dist_weight, norm_weight=norm_weight, which=which)
         
-        action, dist, heading, perp = [i.detach().numpy() for i in [action, dist, heading, perp]]
-        self.last_goal = goal.copy()
-
-        print("\nDIST:", dist * dist_weight)
-        print("HEADING:", heading * dist * heading_weight)
-        print("PERP:", perp * dist * perp_weight, "\n")
+        goal = self.get_goal()
+        last_goal = self.last_goal if self.started else state
+        action = self.agent.mpc_action(state, last_goal, goal,
+                                self.action_range, swarm=False, n_steps=self.mpc_steps,
+                                n_samples=self.mpc_samples, swarm_weight=self.swarm_weight, perp_weight=self.perp_weight,
+                                heading_weight=self.heading_weight, forward_weight=self.forward_weight,
+                                dist_weight=self.dist_weight, norm_weight=self.norm_weight, which=which)
+        
+        self.last_goal = goal.copy() if self.started else self.last_goal
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
@@ -142,10 +151,12 @@ class RealMPC(KamigamiInterface):
         state_n[-1] *= 180 / np.pi
         print("STATE (x, y, theta [deg]):", state_n, '\n')
         self.service_proxies[0](action_req, f"kami{self.robot_id}")
+        self.time_elapsed += action_req.duration if self.started else 0
 
-        self.dist_losses.append(dist)
-        self.heading_losses.append(heading)
-        self.perp_losses.append(perp)
+        time = rospy.get_time()
+        bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
+        idx = np.argwhere(bool_idx).squeeze()
+        self.losses = np.append(self.losses, self.stamped_losses[idx, 1:], axis=0)
 
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
@@ -153,12 +164,8 @@ class RealMPC(KamigamiInterface):
 
         return action
 
-    def get_goal(self, init=False):
-        t = rospy.get_time()
-        if init:
-            t_rel = 0.
-        else:
-            t_rel = ((t - self.start_time) % self.lap_time) / self.lap_time
+    def get_goal(self):
+        t_rel = (self.time_elapsed % self.lap_time) / self.lap_time
 
         if t_rel < 0.25:
             theta = 2 * np.pi * t_rel / 0.5
@@ -178,49 +185,40 @@ class RealMPC(KamigamiInterface):
 
         return np.block([goal, 0.0])
     
-    def log_after_rollout(self):
-        if rospy.get_time() - self.start_time > 10 and self.dist_to_start() < self.tolerance:
-            self.dist_losses_total.append(np.sum(self.dist_losses))
-            self.heading_losses_total.append(np.sum(self.heading_losses))
-            self.perp_losses_total.append(np.sum(self.perp_losses))
-
-            self.dist_losses = []
-            self.heading_losses = []
-            self.perp_losses = []
-
+    def check_rollout_finished(self):
+        if self.time_elapsed > self.lap_time and self.dist_to_start() < self.tolerance:
             self.laps += 1
-            self.start_time = rospy.get_time()
+            self.time_elapsed = 0.
         
         if self.laps == self.n_rollouts:
             self.dump_performance_metrics()
             self.done = True
             
     def dump_performance_metrics(self):
-        dist_losses = np.array(self.dist_losses_total)
-        perp_losses = np.array(self.perp_losses_total)
-        heading_losses = np.array(self.heading_losses_total)
+        path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/loss/"
+        np.save(path + f"robot{self.robot_id}_{self.model}", self.losses)
 
+        dist_losses, heading_losses, perp_losses, total_losses = self.losses.T
         data = np.array([[dist_losses.mean(), dist_losses.std(), dist_losses.min(), dist_losses.max()],
                          [perp_losses.mean(), perp_losses.std(), perp_losses.min(), perp_losses.max()],
-                         [heading_losses.mean(), heading_losses.std(), heading_losses.min(), heading_losses.max()]])
+                         [heading_losses.mean(), heading_losses.std(), heading_losses.min(), heading_losses.max()],
+                         [total_losses.mean(), total_losses.std(), total_losses.min(), total_losses.max()]])
 
-        path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/loss/"
-        np.save(path + f"robot{self.robot_id}_{self.model}", data)
-
-        print("rows: (dist, perp, heading)")
+        print("rows: (dist, perp, heading, total)")
         print("cols: (mean, std, min, max)")
         print("DATA:", data, "\n")
 
     def collect_training_data(self, state, action):
-        self.plot_states.append(state)
-        if self.collect_data:
-            next_state = self.get_states()
-            self.states.append(state)
-            self.actions.append(action)
-            self.next_states.append(next_state)
-            self.logged_transitions += 1
-            if self.logged_transitions % self.save_freq == 0:
-                self.save_training_data()
+        if self.started:
+            self.plot_states.append(state)
+            if self.collect_data:
+                next_state = self.get_states()
+                self.states.append(state)
+                self.actions.append(action)
+                self.next_states.append(next_state)
+                self.logged_transitions += 1
+                if self.logged_transitions % self.save_freq == 0:
+                    self.save_training_data()
 
 
 if __name__ == '__main__':
