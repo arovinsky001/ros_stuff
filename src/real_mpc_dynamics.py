@@ -182,10 +182,8 @@ class MPCAgent:
                 states[:, -1] %= 2 * torch.pi
                 if self.multi:
                     if which == 0:
-                        print("JOINT 0")
                         ids = torch.stack((torch.ones(len(states)), torch.zeros(len(states))), dim=1)
                     elif which == 2:
-                        print("JOINT 2")
                         ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
                     else:
                         raise ValueError
@@ -194,12 +192,7 @@ class MPCAgent:
                     print("SINGLE")
                     states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
    
-            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, n_samples, swarm=swarm)
-
-            print(f"heading: {(norm_const * heading_weight * heading_loss).mean()}")
-            print(f"perp: {(norm_const * perp_weight * perp_loss).mean()}")
-            print(f"dist: {(dist_weight * dist_loss).mean()}")
-            print(f"forward: {(forward_weight * forward_loss).mean()}")
+            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, n_samples, actions=actions, swarm=swarm)
 
             # normalize appropriate losses and compute total loss
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
@@ -210,7 +203,8 @@ class MPCAgent:
         best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
-    def compute_losses(self, states, prev_goal, goal, n_samples, logging=False, swarm=False):
+    def compute_losses(self, states, prev_goal, goal, n_samples, actions=None, logging=False, swarm=False):
+        states, prev_goal, goal = to_tensor(states, prev_goal, goal)
         goals = torch.tile(goal, (n_samples, 1))
         vec_to_goal = (goal - prev_goal)[:2]
         vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
@@ -218,6 +212,11 @@ class MPCAgent:
         perp_denom = vec_to_goal.norm()
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
+
+        if logging:
+            states = states[None, :]
+            goals = goal[None, :]
+            vecs_to_goal = vec_to_goal[None, :]
 
         # heading computations
         x0, y0, current_angle = states.T
@@ -236,6 +235,8 @@ class MPCAgent:
         perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
 
         if logging:
+            if torch.any(torch.isnan(perp_loss)):
+                import pdb;pdb.set_trace()
             return dist_loss, heading_loss, perp_loss
 
         forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()

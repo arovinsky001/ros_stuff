@@ -28,8 +28,8 @@ class RealMPC(KamigamiInterface):
 
         # weights for MPC cost terms
         self.swarm_weight = 0.0
-        self.perp_weight = 0.0
-        self.heading_weight = 0.0
+        self.perp_weight = 0.4
+        self.heading_weight = 0.2
         self.forward_weight = 0.0
         self.dist_weight = 1.0
         self.norm_weight = 0.0
@@ -38,17 +38,20 @@ class RealMPC(KamigamiInterface):
         self.plot_goals = []
 
         buffer_size = 1000
-        self.stamped_losses = np.zeros(buffer_size, 5)      # timestamp, dist, heading, perp, total
+        self.stamped_losses = np.zeros((buffer_size, 5))      # timestamp, dist, heading, perp, total
         self.losses = np.empty((0, 4))
 
         self.time_elapsed = 0.
         self.logged_transitions = 0
         self.laps = 0
+        self.n_prints = 0
         self.started = False
         
         with open(agent_path, "rb") as f:
             self.agent = pkl.load(f)
             self.agent.model.eval()
+        
+        np.set_printoptions(suppress=True)
 
     def define_goal_trajectory(self):
         self.front_left_corner = np.array([-0.4, -0.9])
@@ -63,32 +66,26 @@ class RealMPC(KamigamiInterface):
         self.front_circle_center = front_circle_center_rel * range + + self.front_left_corner
         self.radius = np.abs(range).mean() * radius_rel
         self.lap_time = 40
-        self.last_goal = self.back_circle_center + np.array([0.0, 1.0]) * self.radius
-        self.last_goal = np.block([self.last_goal, 0.0])
     
     def update_states(self, msg):
         super().update_states(msg)
         if self.not_found:
             return
 
-        state = self.current_states.squeeze()
-        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, self.prev_goal, self.get_goal(), self.n_samples, logging=True)
+        state = self.get_states().squeeze()[:-1]
+        last_goal = self.last_goal if self.started else state
+        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, self.get_goal(), 1, logging=True)
         total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
         
-        self.losses[1:] = self.losses[:-1]
-        self.losses[0] = [rospy.get_time(), dist_loss, heading_loss, perp_loss, total_loss]
-
-        print("\nDIST:", dist_loss * self.dist_weight)
-        print("HEADING:", heading_loss * dist_loss * self.heading_weight)
-        print("PERP:", perp_loss * dist_loss * self.perp_weight, "\n")
+        self.stamped_losses[1:] = self.stamped_losses[:-1]
+        self.stamped_losses[0] = [rospy.get_time()] + [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss, total_loss]]
     
     def run(self):
-        while self.n_updates == 0:
-            print("WAITING FOR FIRST AR TRACKING UPDATE")
-            rospy.sleep(0.1)
+        while self.n_updates < 20:
+            print(f"FILLING LOSS BUFFER, {self.n_updates} UPDATES")
+            rospy.sleep(2)
 
         first_plot = True
-        self.time_elapsed = self.action_range[0, -1]
         self.init_goal = self.get_goal()
         while not rospy.is_shutdown():
             self.step()
@@ -96,21 +93,24 @@ class RealMPC(KamigamiInterface):
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
-            
-            if self.dist_to_start() < self.tolerance:
-                self.started = True
 
-            plot_goals = np.array(self.plot_goals)
-            plot_states = np.array(self.plot_states)
-            plt.plot(plot_goals[:, 0], plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-            plt.plot(plot_states[:, 0], plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
-            if first_plot:
-                plt.legend()
-                plt.ion()
-                plt.show()
-                first_plot = False
-            plt.draw()
-            plt.pause(0.001)
+            if self.started:
+                plot_goals = np.array(self.plot_goals)
+                plot_states = np.array(self.plot_states)
+                plt.plot(plot_goals[:, 0], plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+                plt.plot(plot_states[:, 0], plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+                if first_plot:
+                    plt.legend()
+                    plt.ion()
+                    plt.show()
+                    first_plot = False
+                plt.draw()
+                plt.pause(0.001)
+
+            if self.dist_to_start() < self.tolerance and not self.started:
+                self.started = True
+                self.last_goal = self.get_goal()
+                self.time_elapsed = self.action_range[0, -1]
 
     def dist_to_start(self):
         return np.linalg.norm((self.get_states().squeeze()[:-1] - self.init_goal)[:2])
@@ -138,26 +138,45 @@ class RealMPC(KamigamiInterface):
                                 heading_weight=self.heading_weight, forward_weight=self.forward_weight,
                                 dist_weight=self.dist_weight, norm_weight=self.norm_weight, which=which)
         
-        self.last_goal = goal.copy() if self.started else self.last_goal
+        self.plot_goals.append(goal.copy())
+        action = action.detach().numpy()
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
         action_req.left_pwm = action[0]
         action_req.right_pwm = action[1]
         action_req.duration = action[2]
-        print("\nACTION:", action)
 
-        state_n = state.copy()
-        state_n[-1] *= 180 / np.pi
-        print("STATE (x, y, theta [deg]):", state_n, '\n')
         self.service_proxies[0](action_req, f"kami{self.robot_id}")
         self.time_elapsed += action_req.duration if self.started else 0
 
         time = rospy.get_time()
         bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
-        idx = np.argwhere(bool_idx).squeeze()
-        self.losses = np.append(self.losses, self.stamped_losses[idx, 1:], axis=0)
+        idx = np.argwhere(bool_idx).squeeze().reshape(-1)
 
+        state_n = state.copy()
+        state_n[-1] *= 180 / np.pi
+        self.n_prints += 1
+        print(f"\n\n\n\nNO. {self.n_prints}")
+        print("/////////////////////////////////////////////////")
+        print("=================================================")
+        print(f"RECORDING {len(idx)} LOSSES\n")
+        print("STATE:", state_n)
+        print("ACTION:", action, "\n")
+        if len(idx) != 0:
+            losses_to_record = self.stamped_losses[idx, 1:].squeeze()
+            losses_to_record = losses_to_record[None, :] if len(losses_to_record.shape) == 1 else losses_to_record
+            self.losses = np.append(self.losses, losses_to_record, axis=0)
+            
+            dist_loss, heading_loss, perp_loss, total_loss = losses_to_record if len(losses_to_record.shape) == 1 else losses_to_record[-1]
+            print("DIST:", dist_loss * self.dist_weight)
+            print("HEADING:", heading_loss * dist_loss * self.heading_weight)
+            print("PERP:", perp_loss * dist_loss * self.perp_weight)
+            print("TOTAL:", total_loss)
+        print("=================================================")
+        print("/////////////////////////////////////////////////")
+
+        self.last_goal = goal.copy() if self.started else None
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
             rospy.sleep(0.001)
@@ -180,9 +199,6 @@ class RealMPC(KamigamiInterface):
         theta += np.pi / 4
         goal = center + np.array([np.sin(theta), np.cos(theta)]) * self.radius
         
-        print("GOAL:", goal)
-        self.plot_goals.append(goal)
-
         return np.block([goal, 0.0])
     
     def check_rollout_finished(self):
