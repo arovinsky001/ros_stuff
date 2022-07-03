@@ -192,7 +192,7 @@ class MPCAgent:
                     print("SINGLE")
                     states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
    
-            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, n_samples, actions=actions, swarm=swarm)
+            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, actions=actions, swarm=swarm)
 
             # normalize appropriate losses and compute total loss
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
@@ -203,8 +203,9 @@ class MPCAgent:
         best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
     
-    def compute_losses(self, states, prev_goal, goal, n_samples, actions=None, logging=False, swarm=False):
+    def compute_losses(self, states, prev_goal, goal, actions=None, current=False, signed=False, swarm=False):
         states, prev_goal, goal = to_tensor(states, prev_goal, goal)
+        n_samples = len(states)
         goals = torch.tile(goal, (n_samples, 1))
         vec_to_goal = (goal - prev_goal)[:2]
         vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
@@ -213,7 +214,7 @@ class MPCAgent:
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
 
-        if logging:
+        if current:
             states = states[None, :]
             goals = goal[None, :]
             vecs_to_goal = vec_to_goal[None, :]
@@ -222,19 +223,31 @@ class MPCAgent:
         x0, y0, current_angle = states.T
         # vecs_to_goal = (goals - states)[:, :2]
         # vecs_to_goal = torch.tile(vec_to_goal, (len(states), 1))
-        target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
-        target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0])
+        target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
+        target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0]) + torch.pi
+        if signed:
+            signed_angle_diff1 = target_angle1 - current_angle
+            signed_angle_diff2 = target_angle2 - current_angle
         angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
         angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
         angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
         angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
+        angle_diffs_stacked = torch.stack((angle_diff1, angle_diff2))
         
         # compute losses
         dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
-        heading_loss = torch.stack((angle_diff1, angle_diff2)).min(dim=0)[0].squeeze()
-        perp_loss = (torch.abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
 
-        if logging:
+        heading_idx = angle_diffs_stacked.argmin(dim=0)[0].squeeze()
+        if signed:
+            heading_loss = torch.stack((signed_angle_diff1, signed_angle_diff2)).T[heading_idx].squeeze()
+        else:
+            heading_loss = angle_diffs_stacked[heading_idx].squeeze()
+
+        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
+        if not signed:
+            perp_loss = torch.abs(perp_loss)
+
+        if current:
             if torch.any(torch.isnan(perp_loss)):
                 import pdb;pdb.set_trace()
             return dist_loss, heading_loss, perp_loss

@@ -74,7 +74,7 @@ class RealMPC(KamigamiInterface):
 
         state = self.get_states().squeeze()[:-1]
         last_goal = self.last_goal if self.started else state
-        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, self.get_goal(), 1, logging=True)
+        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, self.get_goal(), current=True)
         total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
         
         self.stamped_losses[1:] = self.stamped_losses[:-1]
@@ -132,14 +132,14 @@ class RealMPC(KamigamiInterface):
         
         goal = self.get_goal()
         last_goal = self.last_goal if self.started else state
-        action = self.agent.mpc_action(state, last_goal, goal,
-                                self.action_range, swarm=False, n_steps=self.mpc_steps,
-                                n_samples=self.mpc_samples, swarm_weight=self.swarm_weight, perp_weight=self.perp_weight,
-                                heading_weight=self.heading_weight, forward_weight=self.forward_weight,
-                                dist_weight=self.dist_weight, norm_weight=self.norm_weight, which=which)
-        
-        self.plot_goals.append(goal.copy())
-        action = action.detach().numpy()
+        if self.control:
+            action = self.differential_drive(state, last_goal, goal)
+        else:
+            action = self.agent.mpc_action(state, last_goal, goal,
+                                    self.action_range, swarm=False, n_steps=self.mpc_steps,
+                                    n_samples=self.mpc_samples, swarm_weight=self.swarm_weight, perp_weight=self.perp_weight,
+                                    heading_weight=self.heading_weight, forward_weight=self.forward_weight,
+                                    dist_weight=self.dist_weight, norm_weight=self.norm_weight, which=which).detach().numpy()
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
@@ -177,11 +177,19 @@ class RealMPC(KamigamiInterface):
         print("/////////////////////////////////////////////////")
 
         self.last_goal = goal.copy() if self.started else None
+        self.plot_goals.append(goal.copy())
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
             rospy.sleep(0.001)
 
         return action
+    
+    def differential_drive(self, state, last_goal, goal):
+        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, goal, current=True, signed=True)
+        ctrl_array = np.array([[0.5, 0.5], [0.5, -0.5]])
+        error_array = np.array([dist_loss * 1.0, perp_loss * 1.0])
+        left_pwm, right_pwm = ctrl_array @ error_array
+        return np.array([left_pwm, right_pwm, 0.1])
 
     def get_goal(self):
         t_rel = (self.time_elapsed % self.lap_time) / self.lap_time
