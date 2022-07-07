@@ -223,25 +223,45 @@ class MPCAgent:
         x0, y0, current_angle = states.T
         # vecs_to_goal = (goals - states)[:, :2]
         # vecs_to_goal = torch.tile(vec_to_goal, (len(states), 1))
-        target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
-        target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0]) + torch.pi
+        # target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
+        # target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0]) + torch.pi
+        target_angle = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
+
+        angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
+        angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0) 
+
+        left = (angle_diff_side > torch.pi)
+        forward = (angle_diff_dir < torch.pi / 2)
+
+        heading_loss = angle_diff_dir
+
         if signed:
-            signed_angle_diff1 = target_angle1 - current_angle
-            signed_angle_diff2 = target_angle2 - current_angle
-        angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
-        angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
-        angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
-        angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
-        angle_diffs_stacked = torch.stack((angle_diff1, angle_diff2))
+            heading_loss[~forward] = (heading_loss[~forward] + torch.pi) % (2 * torch.pi)
+            heading_loss *= left * forward
+
+        #     angle_diff_opposite = angle_diff_dir + torch.pi, angle_diff_dir - torch.pi
+        #     # heading_idx = torch.stack((angle_diff_dir, 
+
+        # if signed:
+        #     signed_angle_diff = target_angle - current_angle
+        #     # signed_angle_diff1 = target_angle1 - current_angle
+        #     # signed_angle_diff2 = target_angle2 - current_angle
+        # angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
+        # angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
+        # angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
+        # angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
+        # angle_diffs_stacked = torch.stack((angle_diff1, angle_diff2))
         
         # compute losses
         dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
-
-        heading_idx = angle_diffs_stacked.argmin(dim=0)[0].squeeze()
         if signed:
-            heading_loss = torch.stack((signed_angle_diff1, signed_angle_diff2)).T[heading_idx].squeeze()
-        else:
-            heading_loss = angle_diffs_stacked[heading_idx].squeeze()
+            dist_loss *= forward
+
+        # heading_idx = angle_diffs_stacked.argmin(dim=0)[0].squeeze()
+        # if signed:
+        #     heading_loss = torch.stack((signed_angle_diff1, signed_angle_diff2)).T[heading_idx].squeeze()
+        # else:
+        #     heading_loss = angle_diffs_stacked.min(dim=0)[0].squeeze()
 
         perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
         if not signed:
@@ -250,6 +270,7 @@ class MPCAgent:
         if current:
             if torch.any(torch.isnan(perp_loss)):
                 import pdb;pdb.set_trace()
+
             return dist_loss, heading_loss, perp_loss
 
         forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()

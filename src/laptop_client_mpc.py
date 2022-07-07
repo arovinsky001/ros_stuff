@@ -187,7 +187,7 @@ class RealMPC(KamigamiInterface):
     def differential_drive(self, state, last_goal, goal):
         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, goal, current=True, signed=True)
         ctrl_array = np.array([[0.5, 0.5], [0.5, -0.5]])
-        error_array = np.array([dist_loss * 1.0, perp_loss * 1.0])
+        error_array = np.array([dist_loss * 1.0, perp_loss * 1.0 + heading_loss * 1.0])
         left_pwm, right_pwm = ctrl_array @ error_array
         return np.array([left_pwm, right_pwm, 0.1])
 

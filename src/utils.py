@@ -17,6 +17,11 @@ class KamigamiInterface:
         self.save_path = save_path
         self.robot_ids = np.array(robot_ids)
 
+        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
+        if not os.path.exists(self.tag_offset_path):
+            self.calibrate()
+        self.tag_offsets = np.load(self.tag_offset_path)
+
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm, 0.1], [max_pwm, max_pwm, 0.6]])
         self.current_states = np.zeros((len(self.robot_ids), 4))    # (x, y, theta, id)
@@ -64,6 +69,23 @@ class KamigamiInterface:
     def get_take_actions(self):
         pass
 
+    def calibrate(self):
+        tag_offsets = np.zeros(10)
+        for id in self.robot_ids:
+            robot_idx = np.argwhere(self.robot_ids == id).squeeze().item()
+            input(f"Place robot {id} on the left calibration point, aligned with the calibration line and hit enter.")
+            left_state = self.get_states()[robot_idx]
+            input(f"Place robot {id} on the right calibration point, aligned with the calibration line and hit enter.")
+            right_state = self.get_states()[robot_idx]
+
+            true_vector = (left_state - right_state)[robot_idx, :2]
+            true_angle = np.arctan2(true_vector[0], true_vector[1])
+            measured_angle = 0.5 * (left_state + right_state)[2]
+
+            tag_offsets[id] = true_angle - measured_angle
+        
+        np.save(self.tag_offset_path, tag_offsets)
+
     def update_states(self, msg):
         found_robots = [False] * len(self.robot_ids)
         for marker in msg.markers:
@@ -83,6 +105,9 @@ class KamigamiInterface:
                 print("sin(x):", np.sin(x), "|| sin(y)", np.sin(y))
                 self.not_found = True
                 return
+
+            if hasattr(self, "tag_offsets"):
+                z += self.tag_offsets[marker.id]
 
             state[0] = marker.pose.pose.position.x
             state[1] = marker.pose.pose.position.y

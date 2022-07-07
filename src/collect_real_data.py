@@ -11,8 +11,10 @@ from ros_stuff.src.utils import KamigamiInterface
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.npz"
 
 class DataCollector(KamigamiInterface):
-    def __init__(self, robot_ids):
+    def __init__(self, robot_ids, calibrate):
         super().__init__(robot_ids, SAVE_PATH)
+        if calibrate:
+            self.calibrate()
 
     def run(self):
         while not rospy.is_shutdown():
@@ -75,8 +77,9 @@ class DataCollector(KamigamiInterface):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Collect random training data.')
     parser.add_argument('-robot_ids', type=int, default=np.array([0, 2]), help='robot id for rollout')
+    parser.add_argument('-calibrate', action="store_true")
 
     args = parser.parse_args()
 
-    dc = DataCollector(args.robot_ids)
+    dc = DataCollector(args.robot_ids, args.calibrate)
     dc.run()
