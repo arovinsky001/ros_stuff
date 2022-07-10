@@ -47,14 +47,18 @@ class DynamicsNetwork(nn.Module):
             nn.Dropout(p=dropout),
             # nn.Linear(hidden_dim, hidden_dim),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
-            # nn.Dropout(p=dropout),
             # nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.GELU(),
+            nn.Dropout(p=dropout),
+            # nn.Linear(hidden_dim, hidden_dim),
+            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.GELU(),
+            # nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
             # nn.utils.spectral_norm(nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)),
         )
         self.output_dim = output_dim
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True, weight_decay=1e-4)
         self.loss_fn = nn.MSELoss(reduction='none')
         self.dist = dist
         self.entropy_weight = entropy_weight
@@ -118,6 +122,7 @@ class DynamicsNetwork(nn.Module):
 
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(self.model.parameters(), 1.)
         self.optimizer.step()
         return dcn(losses)
 
@@ -153,7 +158,7 @@ class DynamicsNetwork(nn.Module):
             states_delta = arglist[0]
             states_delta_scaled = self.output_scaler.transform(states_delta)
             if not np_type:
-                states_delta_scaled = to_tensor(states_delta)
+                states_delta_scaled = to_tensor(states_delta_scaled)
             return states_delta_scaled
 
 
@@ -391,7 +396,7 @@ class MPCAgent:
         states_delta = next_states_sc - states_sc
 
         # n_train = 300 if self.multi else 160
-        n_test = 50
+        n_test = 100
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=n_test, random_state=self.seed)
@@ -403,43 +408,17 @@ class MPCAgent:
             train_actions = actions[train_idx]
             train_states_delta = states_delta[train_idx]
 
-            if self.ensemble > 1:
-                rand_idx = torch.randint(0, len(train_states), (len(train_states),))
-                train_states = train_states[rand_idx]
-                train_actions = train_actions[rand_idx]
-                train_states_delta = train_states_delta[rand_idx]
+            # if self.ensemble > 1:
+            #     rand_idx = torch.randint(0, len(train_states), (len(train_states),))
+            #     train_states = train_states[rand_idx]
+            #     train_actions = train_actions[rand_idx]
+            #     train_states_delta = train_states_delta[rand_idx]
 
-# new
-# no scale 500
-# ERROR MEAN: [0.0255191  0.02171914 0.22240782 0.22136173]
-# ERROR MEAN: [0.01725932 0.01438991 0.21782211 0.212989  ]
-# ERROR MEAN: [0.01827347 0.01415389 0.23176826 0.20695211]
+# MIN TEST LOSS EPOCH: 1455
+# MIN TEST LOSS: 0.0043968135
 
-# scale 500
-# ERROR MEAN: [0.02181106 0.02391889 0.22154254 0.30314121]
-# ERROR MEAN: [0.02159274 0.02388438 0.22843561 0.30461138]
-# ERROR MEAN: [0.02172161 0.02395391 0.23818665 0.31035521]
-
-# no scale 1000
-# ERROR MEAN: [0.02447312 0.01933563 0.19355452 0.19447084]
-# ERROR MEAN: [0.01673436 0.01550124 0.2096357  0.20053395]
-
-
-# old
-# no scale 500
-# ERROR MEAN: [0.02368923 0.02050197 0.3393739  0.26279337]
-# ERROR MEAN: [0.01386134 0.01548586 0.32144944 0.27274371]
-# ERROR MEAN: [0.01654358 0.01508239 0.36146308 0.26831685]
-
-# no scale 100
-# ERROR MEAN: [0.02046056 0.03318009 0.33179109 0.28025044]
-# ERROR MEAN: [0.0137791  0.02152438 0.33826193 0.28235782]
-# ERROR MEAN: [0.01556799 0.01955299 0.34199481 0.28132791]
-
-# scale 500
-# ERROR MEAN: [0.02043447 0.02752197 0.27281989 0.30779337]
-# ERROR MEAN: [0.02044041 0.02753705 0.2701623  0.31270161]
-# ERROR MEAN: [0.02060534 0.02781321 0.29706241 0.31846031]
+# ERROR MEAN: [0.00536829 0.00440297 0.05339299 0.06419415]
+# ERROR STD: [0.0046311  0.00386342 0.07759195 0.07865122]
 
             if self.multi:
                 train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
@@ -497,7 +476,7 @@ class MPCAgent:
                 training_losses.append(training_loss_mean)
                 model.eval()
                 with torch.no_grad():
-                    pred_states_delta = to_device(to_tensor(self.get_prediction(test_states, test_actions, test_ids, sample=False, delta=True, model_no=k)))
+                    pred_states_delta = to_device(to_tensor(self.get_prediction(test_states, test_actions, test_ids, sample=False, delta=True, scale=True, model_no=k)))
                 test_loss = self.mse_loss(pred_states_delta, test_states_delta)
                 test_loss_mean = dcn(test_loss.mean())
                 test_losses.append(test_loss_mean)
@@ -730,19 +709,20 @@ if __name__ == '__main__':
             training_losses, test_losses, test_idx = agent.train(states, actions, next_states, set_scalers=True,
                                                        epochs=args.epochs, batch_size=batch_size)
 
-            # training_losses = np.array(training_losses).squeeze()
-            # test_losses = np.array(test_losses).squeeze()
-            # print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
-            # print("MIN TEST LOSS:", test_losses.min())
-            # plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
-            # plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
-            # plt.yscale('log')
-            # plt.xlabel('Epoch')
-            # plt.ylabel('Loss')
-            # plt.title('Dynamics Model Loss')
-            # plt.legend()
-            # plt.grid()
-            # plt.show()
+            if args.ensemble == 1:
+                training_losses = np.array(training_losses).squeeze()
+                test_losses = np.array(test_losses).squeeze()
+                print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
+                print("MIN TEST LOSS:", test_losses.min())
+                plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
+                plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+                plt.yscale('log')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss')
+                plt.title('Dynamics Model Loss')
+                plt.legend()
+                plt.grid()
+                plt.show()
         
         if args.save:
             agent_path = args.save_agent_path if args.save_agent_path else agent_path
