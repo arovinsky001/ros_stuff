@@ -42,16 +42,20 @@ class DynamicsNetwork(nn.Module):
         super(DynamicsNetwork, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.GELU(),
+            # nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim, momentum=0.1),
+            nn.Dropout(p=dropout),
+            # nn.Linear(hidden_dim, hidden_dim),
+            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.GELU(),
+            # nn.ReLU(),
+            nn.BatchNorm1d(hidden_dim, momentum=0.2),
             nn.Dropout(p=dropout),
             # nn.Linear(hidden_dim, hidden_dim),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
             # nn.BatchNorm1d(hidden_dim, momentum=0.1),
-            nn.GELU(),
-            nn.Dropout(p=dropout),
-            # nn.Linear(hidden_dim, hidden_dim),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.ReLU(),
             nn.GELU(),
             # nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
@@ -416,9 +420,20 @@ class MPCAgent:
 
 # MIN TEST LOSS EPOCH: 1455
 # MIN TEST LOSS: 0.0043968135
-
 # ERROR MEAN: [0.00536829 0.00440297 0.05339299 0.06419415]
 # ERROR STD: [0.0046311  0.00386342 0.07759195 0.07865122]
+
+
+# double
+# MIN TEST LOSS EPOCH: 1477
+# MIN TEST LOSS: 0.009688836
+# ERROR MEAN: [0.00694657 0.0062983  0.10032971 0.10628336]
+# ERROR STD: [0.00594429 0.00540606 0.09717228 0.10590777]
+
+# MIN TEST LOSS EPOCH: 1570
+# MIN TEST LOSS: 0.009007276
+# ERROR MEAN: [0.00685502 0.00633353 0.0934643  0.09946386]
+# ERROR STD: [0.00634258 0.00524496 0.08992632 0.10178008]
 
             if self.multi:
                 train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
@@ -532,7 +547,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    if args.hidden_dim >= 1024:
+    if args.hidden_dim >= 1000:
         if torch.backends.mps.is_available:
             device = torch.device("mps")
         else:
