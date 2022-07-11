@@ -13,8 +13,10 @@ from utils import KamigamiInterface
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online400.npz"
 
 class RealMPC(KamigamiInterface):
-    def __init__(self, robot_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data):
-        super().__init__([robot_id], SAVE_PATH)
+    def __init__(self, robot_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate):
+        with open(agent_path, "rb") as f:
+            self.agent = pkl.load(f)
+        super().__init__([robot_id], SAVE_PATH, calibrate)
         self.define_goal_trajectory()
 
         self.mpc_steps = mpc_steps
@@ -28,11 +30,18 @@ class RealMPC(KamigamiInterface):
 
         # weights for MPC cost terms
         self.swarm_weight = 0.0
-        self.perp_weight = 0.4
-        self.heading_weight = 0.2
+        self.perp_weight = 2.
+        self.heading_weight = 0.5
         self.forward_weight = 0.0
-        self.dist_weight = 1.0
+        self.dist_weight = 30.
         self.norm_weight = 0.0
+
+        # self.swarm_weight = 0.0
+        # self.perp_weight = 2.0
+        # self.heading_weight = 0.01
+        # self.forward_weight = 0.0
+        # self.dist_weight = 20.
+        # self.norm_weight = 0.0
 
         self.plot_states = []
         self.plot_goals = []
@@ -47,76 +56,76 @@ class RealMPC(KamigamiInterface):
         self.n_prints = 0
         self.started = False
         
-        with open(agent_path, "rb") as f:
-            self.agent = pkl.load(f)
-            self.agent.model.eval()
-        
         np.set_printoptions(suppress=True)
 
     def define_goal_trajectory(self):
-        self.front_left_corner = np.array([-0.4, -0.9])
-        self.back_right_corner = np.array([-1.4, 0.1])
-        range = self.back_right_corner - self.front_left_corner
+        self.front_left_corner = np.array([-0.3, -1.0])
+        self.back_right_corner = np.array([-1.45, 0.0])
+        corner_range = self.back_right_corner - self.front_left_corner
 
-        radius_rel = 0.3
+        # radius_rel = 0.3
         back_circle_center_rel = np.array([0.38, 0.65])
         front_circle_center_rel = np.array([0.74, 0.3])
         
-        self.back_circle_center = back_circle_center_rel * range + self.front_left_corner
-        self.front_circle_center = front_circle_center_rel * range + + self.front_left_corner
-        self.radius = np.abs(range).mean() * radius_rel
-        self.lap_time = 40
+        self.back_circle_center = back_circle_center_rel * corner_range + self.front_left_corner
+        self.front_circle_center = front_circle_center_rel * corner_range + + self.front_left_corner
+        # self.radius = np.abs(corner_range).mean() * radius_rel
+        self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
     
     def update_states(self, msg):
         super().update_states(msg)
         if self.not_found:
             return
 
-        state = self.get_states().squeeze()[:-1]
+        state = self.current_states.squeeze()[:-1]
         last_goal = self.last_goal if self.started else state
         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, self.get_goal(), current=True)
         total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
         
-        self.stamped_losses[1:] = self.stamped_losses[:-1]
-        self.stamped_losses[0] = [rospy.get_time()] + [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss, total_loss]]
+        if self.started:
+            self.stamped_losses[1:] = self.stamped_losses[:-1]
+            self.stamped_losses[0] = [rospy.get_time()] + [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss, total_loss]]
     
     def run(self):
-        while self.n_updates < 20:
+        rospy.sleep(0.2)
+        while self.n_updates < 1 and not rospy.is_shutdown():
             print(f"FILLING LOSS BUFFER, {self.n_updates} UPDATES")
-            rospy.sleep(2)
+            rospy.sleep(0.2)
 
-        first_plot = True
+        self.first_plot = True
         self.init_goal = self.get_goal()
         while not rospy.is_shutdown():
+            if self.started:
+                self.plot_states.append(self.current_states.squeeze().copy())
+                self.plot_goals.append(self.last_goal.copy())
+                # plot_goals = np.array(self.plot_goals)
+                # plot_states = np.array(self.plot_states)
+                # plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+                # plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+                # if self.first_plot:
+                #     plt.legend()
+                #     plt.ion()
+                #     plt.show()
+                #     self.first_plot = False
+                # plt.draw()
+                # plt.pause(0.0001)
+
+            if self.dist_to_start() < self.tolerance and not self.started:
+                self.started = True
+                self.last_goal = self.get_goal()
+                self.time_elapsed = self.duration / 2
+
             self.step()
 
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
-            if self.started:
-                plot_goals = np.array(self.plot_goals)
-                plot_states = np.array(self.plot_states)
-                plt.plot(plot_goals[:, 0], plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-                plt.plot(plot_states[:, 0], plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
-                if first_plot:
-                    plt.legend()
-                    plt.ion()
-                    plt.show()
-                    first_plot = False
-                plt.draw()
-                plt.pause(0.001)
-
-            if self.dist_to_start() < self.tolerance and not self.started:
-                self.started = True
-                self.last_goal = self.get_goal()
-                self.time_elapsed = self.action_range[0, -1]
-
     def dist_to_start(self):
-        return np.linalg.norm((self.get_states().squeeze()[:-1] - self.init_goal)[:2])
+        return np.linalg.norm((self.get_states(wait=False).squeeze()[:-1] - self.init_goal)[:2])
 
     def step(self):
-        state = self.get_states().squeeze()
+        state = self.get_states(wait=self.started).squeeze()
         action = self.get_take_actions(state[:-1])
 
         self.collect_training_data(state, action)
@@ -132,7 +141,7 @@ class RealMPC(KamigamiInterface):
         
         goal = self.get_goal()
         last_goal = self.last_goal if self.started else state
-        if self.control:
+        if "control" in self.model:
             action = self.differential_drive(state, last_goal, goal)
         else:
             action = self.agent.mpc_action(state, last_goal, goal,
@@ -145,7 +154,7 @@ class RealMPC(KamigamiInterface):
         action_req = RobotCmd()
         action_req.left_pwm = action[0]
         action_req.right_pwm = action[1]
-        action_req.duration = action[2]
+        action_req.duration = self.duration
 
         self.service_proxies[0](action_req, f"kami{self.robot_id}")
         self.time_elapsed += action_req.duration if self.started else 0
@@ -161,6 +170,7 @@ class RealMPC(KamigamiInterface):
         print("/////////////////////////////////////////////////")
         print("=================================================")
         print(f"RECORDING {len(idx)} LOSSES\n")
+        print("GOAL:", goal)
         print("STATE:", state_n)
         print("ACTION:", action, "\n")
         if len(idx) != 0:
@@ -169,15 +179,14 @@ class RealMPC(KamigamiInterface):
             self.losses = np.append(self.losses, losses_to_record, axis=0)
             
             dist_loss, heading_loss, perp_loss, total_loss = losses_to_record if len(losses_to_record.shape) == 1 else losses_to_record[-1]
-            print("DIST:", dist_loss * self.dist_weight)
-            print("HEADING:", heading_loss * dist_loss * self.heading_weight)
-            print("PERP:", perp_loss * dist_loss * self.perp_weight)
+            print("DIST:", dist_loss)
+            print("HEADING:", heading_loss)
+            print("PERP:", perp_loss)
             print("TOTAL:", total_loss)
         print("=================================================")
         print("/////////////////////////////////////////////////")
 
         self.last_goal = goal.copy() if self.started else None
-        self.plot_goals.append(goal.copy())
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
             rospy.sleep(0.001)
@@ -186,10 +195,11 @@ class RealMPC(KamigamiInterface):
     
     def differential_drive(self, state, last_goal, goal):
         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, goal, current=True, signed=True)
+        dist_loss, heading_loss, perp_loss = [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss]]
         ctrl_array = np.array([[0.5, 0.5], [0.5, -0.5]])
-        error_array = np.array([dist_loss * 1.0, perp_loss * 1.0 + heading_loss * 1.0])
+        error_array = np.array([dist_loss * 15.0, (perp_loss * 15.0 + heading_loss * 4.0)]) * 1.4
         left_pwm, right_pwm = ctrl_array @ error_array
-        return np.array([left_pwm, right_pwm, 0.1])
+        return np.array([left_pwm, right_pwm])
 
     def get_goal(self):
         t_rel = (self.time_elapsed % self.lap_time) / self.lap_time
@@ -210,9 +220,22 @@ class RealMPC(KamigamiInterface):
         return np.block([goal, 0.0])
     
     def check_rollout_finished(self):
-        if self.time_elapsed > self.lap_time and self.dist_to_start() < self.tolerance:
+        if self.time_elapsed > self.lap_time:
             self.laps += 1
             self.time_elapsed = 0.
+            
+            self.started = False
+            plot_goals = np.array(self.plot_goals)
+            plot_states = np.array(self.plot_states)
+            plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+            plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+            if self.first_plot:
+                plt.legend()
+                plt.ion()
+                plt.show()
+                self.first_plot = False
+            plt.draw()
+            plt.pause(0.001)
         
         if self.laps == self.n_rollouts:
             self.dump_performance_metrics()
@@ -233,16 +256,14 @@ class RealMPC(KamigamiInterface):
         print("DATA:", data, "\n")
 
     def collect_training_data(self, state, action):
-        if self.started:
-            self.plot_states.append(state)
-            if self.collect_data:
-                next_state = self.get_states()
-                self.states.append(state)
-                self.actions.append(action)
-                self.next_states.append(next_state)
-                self.logged_transitions += 1
-                if self.logged_transitions % self.save_freq == 0:
-                    self.save_training_data()
+        if self.started and self.collect_data:
+            next_state = self.get_states()
+            self.states.append(state)
+            self.actions.append(action)
+            self.next_states.append(next_state)
+            self.logged_transitions += 1
+            if self.logged_transitions % self.save_freq == 0:
+                self.save_training_data()
 
 
 if __name__ == '__main__':
@@ -255,6 +276,7 @@ if __name__ == '__main__':
     parser.add_argument('-tolerance', type=float, default=0.05)
     parser.add_argument('-collect_data', action='store_true')
     parser.add_argument('-lap_time', type=float)
+    parser.add_argument('-calibrate', action="store_true")
 
     args = parser.parse_args()
 
@@ -278,8 +300,10 @@ if __name__ == '__main__':
         agent_path += "real_single2_400.pkl"
     elif "amazing" in args.model:
         agent_path += "real_AMAZING_kami1.pkl"
+    elif "control" in args.model:
+        agent_path += "real_single2.pkl"
     else:
         raise ValueError
 
-    r = RealMPC(args.robot_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data)
+    r = RealMPC(args.robot_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data, args.calibrate)
     r.run()

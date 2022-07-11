@@ -13,17 +13,13 @@ from tf.transformations import euler_from_quaternion
 
 
 class KamigamiInterface:
-    def __init__(self, robot_ids, save_path):
+    def __init__(self, robot_ids, save_path, calibrate):
         self.save_path = save_path
         self.robot_ids = np.array(robot_ids)
 
-        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
-        if not os.path.exists(self.tag_offset_path):
-            self.calibrate()
-        self.tag_offsets = np.load(self.tag_offset_path)
-
         max_pwm = 0.999
-        self.action_range = np.array([[-max_pwm, -max_pwm, 0.1], [max_pwm, max_pwm, 0.6]])
+        self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
+        self.duration = 0.2
         self.current_states = np.zeros((len(self.robot_ids), 4))    # (x, y, theta, id)
 
         # for perturbing robots in case not visible
@@ -34,10 +30,11 @@ class KamigamiInterface:
 
         self.perturb_count = 0
         self.n_updates = 0
+        self.last_n_updates = 0
         self.not_found = False
         
-        self.n_avg_states = 4
-        self.n_wait_updates = 4
+        self.n_avg_states = 1
+        self.n_wait_updates = 1
         self.max_perturb_count = 5
         self.n_clip = 3
         self.flat_lim = 0.6
@@ -47,6 +44,11 @@ class KamigamiInterface:
         self.actions = []
         self.next_states = []
         self.done = False
+
+        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
+        if not os.path.exists(self.tag_offset_path) or calibrate:
+            self.calibrate()
+        self.tag_offsets = np.load(self.tag_offset_path)
 
         rospy.init_node("kamigami_interface")
 
@@ -74,11 +76,11 @@ class KamigamiInterface:
         for id in self.robot_ids:
             robot_idx = np.argwhere(self.robot_ids == id).squeeze().item()
             input(f"Place robot {id} on the left calibration point, aligned with the calibration line and hit enter.")
-            left_state = self.get_states()[robot_idx]
+            left_state = self.get_states(wait=False)[robot_idx]
             input(f"Place robot {id} on the right calibration point, aligned with the calibration line and hit enter.")
-            right_state = self.get_states()[robot_idx]
+            right_state = self.get_states(wait=False)[robot_idx]
 
-            true_vector = (left_state - right_state)[robot_idx, :2]
+            true_vector = (left_state - right_state)[:2]
             true_angle = np.arctan2(true_vector[0], true_vector[1])
             measured_angle = 0.5 * (left_state + right_state)[2]
 
@@ -117,7 +119,7 @@ class KamigamiInterface:
         self.not_found = not np.all(found_robots)
         self.n_updates += 0 if self.not_found else 1
 
-    def get_states(self, perturb=False):
+    def get_states(self, perturb=False, wait=True):
         if perturb:
             if self.perturb_count >= self.max_perturb_count:
                 print("\n\nRobot hit boundary!\n\n")
@@ -139,11 +141,11 @@ class KamigamiInterface:
 
         if self.n_avg_states > 1:
             current_states = []
-            n_updates = self.n_updates
             while len(current_states) < self.n_avg_states:
-                if self.n_updates == n_updates:
-                    rospy.sleep(0.001)
-                n_updates = self.n_updates
+                if wait and self.n_updates == self.last_n_updates:
+                    rospy.sleep(0.0001)
+                    continue
+                self.last_n_updates = self.n_updates
                 current_states.append(self.current_states.copy())
             
             current_states = np.array(current_states).squeeze()
@@ -153,7 +155,11 @@ class KamigamiInterface:
 
             return current_states
         else:
-            return self.current_states.copy().squeeze()
+            while wait and self.n_updates == self.last_n_updates:
+                rospy.sleep(0.0001)
+            self.last_n_updates = self.n_updates
+
+            return self.current_states.copy()
 
     def save_training_data(self, clip_end=False):
         states = np.array(self.states)

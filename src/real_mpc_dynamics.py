@@ -14,7 +14,7 @@ from torch import tensor
 from tqdm import trange, tqdm
 
 pi = torch.pi
-# device = torch.device("cpu")
+device = torch.device("cpu")
 
 def dcn(*args):
     ret = []
@@ -120,9 +120,6 @@ class DynamicsNetwork(nn.Module):
             pred_state_delta = self(state, action, id)
             losses = self.loss_fn(pred_state_delta, state_delta)
         loss = losses.mean()
-        # sin = pred_state_delta[:, 2] + state[:, 0]
-        # cos = pred_state_delta[:, 3] + state[:, 1]
-        # loss += (self.loss_fn(sin**2 + cos**2, torch.ones_like(sin))).mean() * 0.05
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -201,14 +198,14 @@ class MPCAgent:
                         ids = torch.stack((torch.zeros(len(states)), torch.ones(len(states))), dim=1)
                     else:
                         raise ValueError
-                    states = to_tensor(self.get_prediction(states, actions, ids, sample=False), requires_grad=False)
+                    states = to_tensor(self.get_prediction(states, actions, ids, sample=False, scale=True, use_ensemble=True), requires_grad=False)
                 else:
-                    print("SINGLE")
-                    states = to_tensor(self.get_prediction(states, actions, sample=False), requires_grad=False)
+                    states = to_tensor(self.get_prediction(states, actions, sample=False, scale=True, use_ensemble=True), requires_grad=False)
    
             dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, actions=actions, swarm=swarm)
 
             # normalize appropriate losses and compute total loss
+            norm_const = 1
             all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
                                 + swarm_weight * swarm_loss + norm_weight * norm_loss) \
                                 + dist_weight * dist_loss + forward_weight * forward_loss
@@ -219,80 +216,62 @@ class MPCAgent:
     
     def compute_losses(self, states, prev_goal, goal, actions=None, current=False, signed=False, swarm=False):
         states, prev_goal, goal = to_tensor(states, prev_goal, goal)
-        n_samples = len(states)
-        goals = torch.tile(goal, (n_samples, 1))
         vec_to_goal = (goal - prev_goal)[:2]
-        vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
-        optimal_dot = vec_to_goal / vec_to_goal.norm()
-        perp_denom = vec_to_goal.norm()
-        x1, y1, _ = prev_goal
-        x2, y2, _ = goal
 
         if current:
             states = states[None, :]
             goals = goal[None, :]
             vecs_to_goal = vec_to_goal[None, :]
+        else:
+            n_samples = len(states)
+            goals = torch.tile(goal, (n_samples, 1))
+            vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
 
-        # heading computations
+        optimal_dot = vec_to_goal / vec_to_goal.norm()
+        perp_denom = vec_to_goal.norm()
+        x1, y1, _ = prev_goal
+        x2, y2, _ = goal
+
+        # heading loss
         x0, y0, current_angle = states.T
-        # vecs_to_goal = (goals - states)[:, :2]
-        # vecs_to_goal = torch.tile(vec_to_goal, (len(states), 1))
-        # target_angle1 = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
-        # target_angle2 = torch.atan2(-vecs_to_goal[:, 1], -vecs_to_goal[:, 0]) + torch.pi
         target_angle = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
 
         angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
-        angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0) 
+        angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0)[0]
 
-        left = (angle_diff_side > torch.pi)
-        forward = (angle_diff_dir < torch.pi / 2)
+        left = (angle_diff_side > torch.pi) * 2 - 1.
+        forward = (angle_diff_dir > torch.pi / 2) * 2 - 1.
 
         heading_loss = angle_diff_dir
 
+        heading_loss[forward == 1] = (heading_loss[forward == 1] + torch.pi) % (2 * torch.pi)
+        heading_loss, _ = torch.stack((heading_loss, 2 * torch.pi - heading_loss)).min(dim=0)
         if signed:
-            heading_loss[~forward] = (heading_loss[~forward] + torch.pi) % (2 * torch.pi)
             heading_loss *= left * forward
 
-        #     angle_diff_opposite = angle_diff_dir + torch.pi, angle_diff_dir - torch.pi
-        #     # heading_idx = torch.stack((angle_diff_dir, 
-
-        # if signed:
-        #     signed_angle_diff = target_angle - current_angle
-        #     # signed_angle_diff1 = target_angle1 - current_angle
-        #     # signed_angle_diff2 = target_angle2 - current_angle
-        # angle_diff1 = (target_angle1 - current_angle) % (2 * torch.pi)
-        # angle_diff2 = (target_angle2 - current_angle) % (2 * torch.pi)
-        # angle_diff1 = torch.stack((angle_diff1, 2 * torch.pi - angle_diff1)).min(dim=0)[0]
-        # angle_diff2 = torch.stack((angle_diff2, 2 * torch.pi - angle_diff2)).min(dim=0)[0]
-        # angle_diffs_stacked = torch.stack((angle_diff1, angle_diff2))
-        
-        # compute losses
-        dist_loss = torch.norm((goals - states)[:, :2], dim=-1).squeeze()
+        # dist loss
+        dist_loss = torch.norm((goals - states)[:, :2], dim=-1)
         if signed:
+            vecs_to_goal_states = (goals - states)[:, :2]
+            target_angle = torch.atan2(vecs_to_goal_states[:, 1], vecs_to_goal_states[:, 0]) + torch.pi
+
+            angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
+            angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0)[0]
+            forward = (angle_diff_dir > torch.pi / 2) * 2 - 1.
             dist_loss *= forward
 
-        # heading_idx = angle_diffs_stacked.argmin(dim=0)[0].squeeze()
-        # if signed:
-        #     heading_loss = torch.stack((signed_angle_diff1, signed_angle_diff2)).T[heading_idx].squeeze()
-        # else:
-        #     heading_loss = angle_diffs_stacked.min(dim=0)[0].squeeze()
-
-        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom).squeeze()
+        # perp loss
+        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
         if not signed:
             perp_loss = torch.abs(perp_loss)
 
         if current:
-            if torch.any(torch.isnan(perp_loss)):
-                import pdb;pdb.set_trace()
-
-            return dist_loss, heading_loss, perp_loss
+            return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze()
 
         forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
         norm_loss = -actions[:, :-1].norm(dim=-1).squeeze()
         swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
         norm_const = dist_loss.mean()
-        # norm_const = dist_loss.mean() / vecs_to_goal.mean(dim=0).norm()
-        # norm_const = 1
 
         return dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const
     
@@ -337,6 +316,7 @@ class MPCAgent:
             states_delta = states_delta_sum / len(self.models)
         else:
             model = self.models[model_no]
+            model.eval()
             if self.scale and scale:
                 sc, actions = model.get_scaled(sc, actions)
 

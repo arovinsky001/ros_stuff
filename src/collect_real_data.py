@@ -5,16 +5,14 @@ import numpy as np
 import rospy
 
 from ros_stuff.msg import RobotCmd
-from ros_stuff.src.utils import KamigamiInterface
+from utils import KamigamiInterface
 
 
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.npz"
 
 class DataCollector(KamigamiInterface):
     def __init__(self, robot_ids, calibrate):
-        super().__init__(robot_ids, SAVE_PATH)
-        if calibrate:
-            self.calibrate()
+        super().__init__(robot_ids, SAVE_PATH, calibrate)
 
     def run(self):
         while not rospy.is_shutdown():
@@ -28,22 +26,26 @@ class DataCollector(KamigamiInterface):
             return
 
         states = self.get_states(perturb=True)
-        if not states:
+        if states is None:
             return
 
         actions = self.get_take_actions()
+        if actions is None:
+            return
 
         next_states = self.get_states(perturb=True)
-        if not next_states:
+        if next_states is None:
             return
         
-        if np.linalg.norm((self.current_states[0] - self.current_states[1])[:-2]) < 0.23:
-            print("\nROBOTS TOO CLOSE TO EACH OTHER\n")
-            rospy.signal_shutdown("too close")
-            return
+        if len(self.robot_ids) == 2:
+            if np.linalg.norm((self.current_states[0] - self.current_states[1])[:-2]) < 0.23:
+                print("\nROBOTS TOO CLOSE TO EACH OTHER\n")
+                rospy.signal_shutdown("too close")
+                return
 
-        print(f"\nstates:, {self.current_states}")
+        print(f"\nstates:, {states}")
         print(f"actions: {actions}")
+        print(f"next_states: {next_states}")
         
         self.states.append(states)
         self.actions.append(actions)
@@ -60,15 +62,17 @@ class DataCollector(KamigamiInterface):
         for i, req in enumerate(reqs):
             req.left_pwm = actions[i, 0]
             req.right_pwm = actions[i, 1]
-            req.duration = actions[i, 2]
-            actions[i, 3] = self.robot_ids[i]
+            req.duration = self.duration
+            actions[i, -1] = self.robot_ids[i]
         
-        for i, proxy in enumerate(self.robot_proxies):
+        for i, proxy in enumerate(self.service_proxies):
             proxy(reqs[i], f'kami{self.robot_ids[i]}')
 
         n_updates = self.n_updates
         while self.n_updates - n_updates < self.n_wait_updates:
             rospy.sleep(0.001)
+            if rospy.get_time() - time > 0.5:
+                return
 
         self.perturb_count = 0
         return actions
@@ -76,7 +80,7 @@ class DataCollector(KamigamiInterface):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Collect random training data.')
-    parser.add_argument('-robot_ids', type=int, default=np.array([0, 2]), help='robot id for rollout')
+    parser.add_argument('-robot_ids', nargs='+', type=int, default=[0, 2], help='robot id for rollout')
     parser.add_argument('-calibrate', action="store_true")
 
     args = parser.parse_args()
