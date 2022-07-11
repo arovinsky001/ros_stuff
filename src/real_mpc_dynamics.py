@@ -42,21 +42,21 @@ class DynamicsNetwork(nn.Module):
         super(DynamicsNetwork, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            # nn.ReLU(),
+            # nn.GELU(),
+            nn.ReLU(),
             nn.BatchNorm1d(hidden_dim, momentum=0.1),
             nn.Dropout(p=dropout),
             # nn.Linear(hidden_dim, hidden_dim),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
-            nn.GELU(),
-            # nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim, momentum=0.2),
-            nn.Dropout(p=dropout),
-            # nn.Linear(hidden_dim, hidden_dim),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            # nn.GELU(),
+            nn.ReLU(),
             # nn.BatchNorm1d(hidden_dim, momentum=0.1),
+            # nn.Dropout(p=dropout),
+            # # nn.Linear(hidden_dim, hidden_dim),
+            # nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            # # nn.BatchNorm1d(hidden_dim, momentum=0.1),
             # nn.ReLU(),
-            nn.GELU(),
+            # nn.GELU(),
             # nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
             # nn.utils.spectral_norm(nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)),
@@ -400,14 +400,11 @@ class MPCAgent:
         states_delta = next_states_sc - states_sc
 
         # n_train = 300 if self.multi else 160
-        n_test = 100
+        n_test = 140
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=n_test, random_state=self.seed)
         
-        train_states = states
-        train_actions = actions
-        train_states_delta = states_delta
         test_states, test_actions, test_states_delta = to_device(*to_tensor(test_states, test_actions, test_states_delta))
 
         for k, model in enumerate(self.models):
@@ -415,28 +412,18 @@ class MPCAgent:
             train_actions = actions[train_idx]
             train_states_delta = states_delta[train_idx]
 
+            train_states = states
+            train_actions = actions
+            train_states_delta = states_delta
+
             # if self.ensemble > 1:
             #     rand_idx = torch.randint(0, len(train_states), (len(train_states),))
             #     train_states = train_states[rand_idx]
             #     train_actions = train_actions[rand_idx]
             #     train_states_delta = train_states_delta[rand_idx]
 
-# MIN TEST LOSS EPOCH: 1455
-# MIN TEST LOSS: 0.0043968135
-# ERROR MEAN: [0.00536829 0.00440297 0.05339299 0.06419415]
-# ERROR STD: [0.0046311  0.00386342 0.07759195 0.07865122]
-
-
-# double
-# MIN TEST LOSS EPOCH: 1477
-# MIN TEST LOSS: 0.009688836
-# ERROR MEAN: [0.00694657 0.0062983  0.10032971 0.10628336]
-# ERROR STD: [0.00594429 0.00540606 0.09717228 0.10590777]
-
-# MIN TEST LOSS EPOCH: 1570
-# MIN TEST LOSS: 0.009007276
-# ERROR MEAN: [0.00685502 0.00633353 0.0934643  0.09946386]
-# ERROR STD: [0.00634258 0.00524496 0.08992632 0.10178008]
+# MIN TEST LOSS: 0.006745435
+# ERROR MEAN: [0.00971482 0.00841417 0.07366808 0.07846127]
 
             if self.multi:
                 train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
