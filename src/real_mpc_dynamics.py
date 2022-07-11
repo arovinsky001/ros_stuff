@@ -55,7 +55,7 @@ class DynamicsNetwork(nn.Module):
             # nn.Linear(hidden_dim, hidden_dim),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
             # nn.BatchNorm1d(hidden_dim, momentum=0.1),
-            nn.ReLU(),
+            # nn.ReLU(),
             nn.GELU(),
             # nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
@@ -405,6 +405,9 @@ class MPCAgent:
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=n_test, random_state=self.seed)
         
+        train_states = states
+        train_actions = actions
+        train_states_delta = states_delta
         test_states, test_actions, test_states_delta = to_device(*to_tensor(test_states, test_actions, test_states_delta))
 
         for k, model in enumerate(self.models):
@@ -437,6 +440,7 @@ class MPCAgent:
 
             if self.multi:
                 train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
+                train_ids = all_ids
             else:
                 train_ids, test_ids = None, None
 
