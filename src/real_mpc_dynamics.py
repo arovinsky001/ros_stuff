@@ -38,29 +38,43 @@ def to_tensor(*args, requires_grad=True):
     return ret if len(ret) > 1 else ret[0]
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=256, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True, multi=False):
+    def __init__(self, input_dim, output_dim, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True, multi=False):
         super(DynamicsNetwork, self).__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            # nn.GELU(),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim, momentum=0.1),
-            nn.Dropout(p=dropout),
-            # nn.Linear(hidden_dim, hidden_dim),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
-            # nn.GELU(),
-            nn.ReLU(),
-            # nn.BatchNorm1d(hidden_dim, momentum=0.1),
-            # nn.Dropout(p=dropout),
-            # # nn.Linear(hidden_dim, hidden_dim),
-            # nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
-            # # nn.BatchNorm1d(hidden_dim, momentum=0.1),
-            # nn.ReLU(),
-            # nn.GELU(),
-            # nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
-            # nn.utils.spectral_norm(nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)),
-        )
+        assert hidden_depth > 1
+        layers = [nn.Linear(input_dim, hidden_dim), nn.ReLU(inplace=True)]
+        layers = []
+        for i in range(hidden_depth - 1):
+            layers += [nn.utils.spectral_norm(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))]
+            layers += [nn.ReLU(inplace=True)]
+            layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
+            layers += [nn.Dropout(p=dropout)]
+        layers += [nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)]
+        self.model = nn.Sequential(*layers)
+        # self.model = nn.Sequential(
+        #     nn.utils.spectral_norm(nn.Linear(input_dim, hidden_dim)),
+        #     # nn.GELU(),
+        #     nn.ReLU(),
+        #     nn.BatchNorm1d(hidden_dim, momentum=0.1),
+        #     # nn.LayerNorm(hidden_dim),
+        #     nn.Dropout(p=dropout),
+            
+        #     # nn.Linear(hidden_dim, hidden_dim),
+        #     nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+        #     # nn.GELU(),
+        #     nn.ReLU(),
+        #     # nn.LayerNorm(hidden_dim),
+        #     # nn.Dropout(p=dropout),
+        #     # nn.BatchNorm1d(hidden_dim, momentum=0.1),
+        #     # nn.Dropout(p=dropout),
+        #     # # nn.Linear(hidden_dim, hidden_dim),
+        #     # nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+        #     # # nn.BatchNorm1d(hidden_dim, momentum=0.1),
+        #     # nn.ReLU(),
+        #     # nn.GELU(),
+        #     # nn.Dropout(p=dropout),
+        #     nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim),
+        #     # nn.utils.spectral_norm(nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)),
+        # )
         self.output_dim = output_dim
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True, weight_decay=1e-4)
         self.loss_fn = nn.MSELoss(reduction='none')
@@ -73,8 +87,12 @@ class DynamicsNetwork(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight)
-            m.bias.data.fill_(0.01)
+            nn.init.orthogonal_(m.weight.data)
+            if hasattr(m.bias, 'data'):
+                m.bias.data.fill_(0.0)
+        # if isinstance(m, nn.Linear):
+        #     torch.nn.init.xavier_uniform_(m.weight)
+        #     m.bias.data.fill_(0.01)
 
     def forward(self, state, action, id=None):
         if self.multi:
@@ -127,33 +145,45 @@ class DynamicsNetwork(nn.Module):
         self.optimizer.step()
         return dcn(losses)
 
-    def set_scalers(self, states, actions, states_delta):
+    def set_scalers(self, states, actions, states_delta, ids=None):
         states, actions, states_delta = dcn(states, actions, states_delta)
-        self.input_scaler = StandardScaler().fit(np.append(states, actions, axis=-1))
+        if ids is not None:
+            ids = dcn(ids)
+        inputs = [states, actions, ids] if ids is not None else [states, actions]
+        self.input_scaler = StandardScaler().fit(np.concatenate(inputs, axis=-1))
         self.output_scaler = StandardScaler().fit(states_delta)
     
     def get_scaled(self, *args):
         np_type = True
         arglist = list(args)
         for i, arg in enumerate(arglist):
-            if not isinstance(arg, np.ndarray):
+            if arg is not None and not isinstance(arg, np.ndarray):
                 np_type = False
                 arglist[i] = dcn(arg)
-        if len(arglist) == 2:
+        if len(arglist) == 3:
             # This means args are state and action
-            states, actions = arglist
+            states, actions, ids = arglist
             if len(states.shape) == 1:
                 states = states[None, :]
             if len(actions.shape) == 1:
                 actions = actions[None, :]
+            if ids is not None and len(ids.shape) == 1:
+                ids = ids[None, :]
             
-            states_actions = np.append(states, actions, axis=-1)
-            states_actions_scaled = self.input_scaler.transform(states_actions)
-            states_scaled = states_actions_scaled[:, :states.shape[-1]]
-            actions_scaled = states_actions_scaled[:, states.shape[-1]:]
+            inputs = [states, actions, ids] if ids is not None else [states, actions]
+            inputs = np.concatenate(inputs, axis=-1)
+            inputs_scaled = self.input_scaler.transform(inputs)
+            states_scaled = inputs_scaled[:, :states.shape[-1]]
+            actions_scaled = inputs_scaled[:, states.shape[-1]:states.shape[-1]+actions.shape[-1]]
+            if ids is not None:
+                ids_scaled = inputs_scaled[:, states.shape[-1]+actions.shape[-1]:]
             if not np_type:
                 states_scaled, actions_scaled = to_tensor(states_scaled, actions_scaled)
-            return states_scaled, actions_scaled
+                if ids is not None:
+                    ids_scaled = to_tensor(ids_scaled)
+            if ids is not None:
+                return states_scaled, actions_scaled, ids_scaled
+            return states_scaled, actions_scaled, None
         else:
             # This means args is states_delta
             states_delta = arglist[0]
@@ -164,9 +194,9 @@ class DynamicsNetwork(nn.Module):
 
 
 class MPCAgent:
-    def __init__(self, input_dim, output_dim, seed=1, hidden_dim=512, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True, multi=False, ensemble=0):
+    def __init__(self, input_dim, output_dim, seed=1, hidden_dim=512, hidden_depth=2, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True, multi=False, ensemble=0):
         assert ensemble > 0
-        self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist, multi=multi)
+        self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist, multi=multi)
                                 for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
@@ -288,17 +318,17 @@ class MPCAgent:
             states_delta_sum = np.zeros((len(states_xy), 4))
             for model in self.models:
                 model.eval()
-                cur_sc, cur_actions = sc, actions
+                cur_sc, cur_actions, cur_ids = sc, actions, ids
                 if self.scale and scale:
-                    cur_sc, cur_actions = model.get_scaled(cur_sc, cur_actions)
+                    cur_sc, cur_actions, cur_ids = model.get_scaled(cur_sc, cur_actions, cur_ids)
 
                 if self.multi:
-                    ids = to_device(to_tensor(ids))
+                    cur_ids = to_device(to_tensor(cur_ids))
                 cur_sc, cur_actions = to_tensor(cur_sc, cur_actions)
                 cur_sc, cur_actions = to_device(cur_sc, cur_actions)
 
                 with torch.no_grad():
-                    model_output = model(cur_sc, cur_actions, ids)
+                    model_output = model(cur_sc, cur_actions, cur_ids)
 
                 if model.dist:
                     if sample:
@@ -318,7 +348,7 @@ class MPCAgent:
             model = self.models[model_no]
             model.eval()
             if self.scale and scale:
-                sc, actions = model.get_scaled(sc, actions)
+                sc, actions, ids = model.get_scaled(sc, actions, ids)
 
             if self.multi:
                 ids = to_device(to_tensor(ids))
@@ -361,7 +391,7 @@ class MPCAgent:
         loss = neighbor_dists.mean(dim=0) * goal_term.mean()
         return loss
 
-    def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False):
+    def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         states, actions, next_states = to_tensor(states, actions, next_states)
 
         if self.multi:
@@ -379,7 +409,6 @@ class MPCAgent:
         next_states_sc = torch.cat([next_states[:, :-1], sc], dim=-1)
         states_delta = next_states_sc - states_sc
 
-        # n_train = 300 if self.multi else 160
         n_test = 140
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
@@ -388,36 +417,37 @@ class MPCAgent:
         test_states, test_actions, test_states_delta = to_device(*to_tensor(test_states, test_actions, test_states_delta))
 
         for k, model in enumerate(self.models):
-            train_states = states[train_idx]
-            train_actions = actions[train_idx]
-            train_states_delta = states_delta[train_idx]
+            if use_all_data:
+                train_states = states
+                train_actions = actions
+                train_states_delta = states_delta
+            else:
+                train_states = states[train_idx]
+                train_actions = actions[train_idx]
+                train_states_delta = states_delta[train_idx]
 
-            train_states = states
-            train_actions = actions
-            train_states_delta = states_delta
-
-            # if self.ensemble > 1:
-            #     rand_idx = torch.randint(0, len(train_states), (len(train_states),))
-            #     train_states = train_states[rand_idx]
-            #     train_actions = train_actions[rand_idx]
-            #     train_states_delta = train_states_delta[rand_idx]
-
-# MIN TEST LOSS: 0.006745435
-# ERROR MEAN: [0.00971482 0.00841417 0.07366808 0.07846127]
+            if self.ensemble > 1:
+                rand_idx = torch.randint(0, len(train_states), (len(train_states),))
+                import pdb;pdb.set_trace()
+                train_states = train_states[rand_idx]
+                train_actions = train_actions[rand_idx]
+                train_states_delta = train_states_delta[rand_idx]
 
             if self.multi:
-                train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
-                train_ids = all_ids
+                if use_all_data:
+                    train_ids = all_ids
+                else:
+                    train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
             else:
                 train_ids, test_ids = None, None
 
             train_states = torch.stack([torch.sin(train_states[:, -1]), torch.cos(train_states[:, -1])], dim=1)
 
             if set_scalers:
-                model.set_scalers(train_states, train_actions, train_states_delta)
+                model.set_scalers(train_states, train_actions, train_states_delta, train_ids)
 
             if self.scale:
-                train_states, train_actions = model.get_scaled(train_states, train_actions)
+                train_states, train_actions, train_ids = model.get_scaled(train_states, train_actions, train_ids)
                 train_states_delta = model.get_scaled(train_states_delta)
 
             train_states, train_actions, train_states_delta = to_tensor(train_states, train_actions, train_states_delta)
@@ -482,7 +512,9 @@ if __name__ == '__main__':
     parser.add_argument('-new_agent', '-n', action='store_true',
                         help='flag to train new agent')
     parser.add_argument('-hidden_dim', type=int, default=512,
-                        help='hidden layers dimension')
+                        help='dimension of hidden layers for dynamics network')
+    parser.add_argument('-hidden_depth', type=int, default=2,
+                        help='number of hidden layers for dynamics network')
     parser.add_argument('-epochs', type=int, default=10,
                         help='number of training epochs for new agent')
     parser.add_argument('-batch_size', type=int, default=128,
@@ -511,6 +543,7 @@ if __name__ == '__main__':
                         help='flag to use data from multiple robots')
     parser.add_argument('-ensemble', type=int, default=1,
                         help='how many networks to use for an ensemble')
+    parser.add_argument('-use_all_data', action='store_true')
     parser.add_argument('-naive', action='store_true')
     parser.add_argument('-robot', type=int)
 
@@ -518,7 +551,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    if args.hidden_dim >= 1000:
+    if args.hidden_dim * args.hidden_depth >= 4000:
         if torch.backends.mps.is_available:
             device = torch.device("mps")
         else:
@@ -578,18 +611,18 @@ if __name__ == '__main__':
             actions = actions.squeeze()
             next_states = next_states.squeeze()
 
-            # states = states[:-2]
-            # actions_shift_0 = actions[:-2]
-            # actions_shift_1 = actions[1:-1]
-            # actions_shift_2 = actions[2:]
-            # actions = np.concatenate([actions_shift_0, actions_shift_1, actions_shift_2], axis=-1)
-            # next_states = next_states[2:]
+        # states = states[:-2]
+        # actions_shift_0 = actions[:-2]
+        # actions_shift_1 = actions[1:-1]
+        # actions_shift_2 = actions[2:]
+        # actions = np.concatenate([actions_shift_0, actions_shift_1, actions_shift_2], axis=-1)
+        # next_states = next_states[2:]
 
-            # states = states[:-1]
-            # actions_shift_0 = actions[:-1]
-            # actions_shift_1 = actions[1:]
-            # actions = np.concatenate([actions_shift_0, actions_shift_1], axis=-1)
-            # next_states = next_states[1:]
+        # states = states[:-1]
+        # actions_shift_0 = actions[:-1]
+        # actions_shift_1 = actions[1:]
+        # actions = np.concatenate([actions_shift_0, actions_shift_1], axis=-1)
+        # next_states = next_states[1:]
 
     if args.retrain:
         online_data = np.load("../../sim/data/real_data_online400.npz")
@@ -686,14 +719,14 @@ if __name__ == '__main__':
         
         agent = MPCAgent(input_dim, output_dim, seed=args.seed, dist=args.dist,
                          scale=args.scale, multi=args.multi, hidden_dim=args.hidden_dim,
-                         lr=args.learning_rate, dropout=args.dropout, entropy_weight=args.entropy,
-                         ensemble=args.ensemble)
+                         hidden_depth=args.hidden_depth, lr=args.learning_rate,
+                         dropout=args.dropout, entropy_weight=args.entropy, ensemble=args.ensemble)
 
         # batch_sizes = [args.batch_size, args.batch_size * 10, args.batch_size * 100, args.batch_size * 1000]
         batch_sizes = [args.batch_size]
         for batch_size in batch_sizes:
             training_losses, test_losses, test_idx = agent.train(states, actions, next_states, set_scalers=True,
-                                                       epochs=args.epochs, batch_size=batch_size)
+                                                       epochs=args.epochs, batch_size=batch_size, use_all_data=args.use_all_data)
 
             if args.ensemble == 1:
                 training_losses = np.array(training_losses).squeeze()
