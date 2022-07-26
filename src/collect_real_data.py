@@ -13,6 +13,7 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data.np
 class DataCollector(KamigamiInterface):
     def __init__(self, robot_ids, calibrate):
         super().__init__(robot_ids, SAVE_PATH, calibrate)
+        self.started = True
 
     def run(self):
         while not rospy.is_shutdown():
@@ -69,6 +70,7 @@ class DataCollector(KamigamiInterface):
             proxy(reqs[i], f'kami{self.robot_ids[i]}')
 
         n_updates = self.n_updates
+        time = rospy.get_time()
         while self.n_updates - n_updates < self.n_wait_updates:
             rospy.sleep(0.001)
             if rospy.get_time() - time > 0.5:

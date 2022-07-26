@@ -13,7 +13,7 @@ from utils import KamigamiInterface
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online400.npz"
 
 class RealMPC(KamigamiInterface):
-    def __init__(self, robot_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate):
+    def __init__(self, robot_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate, plot):
         with open(agent_path, "rb") as f:
             self.agent = pkl.load(f)
         super().__init__([robot_id], SAVE_PATH, calibrate)
@@ -26,20 +26,23 @@ class RealMPC(KamigamiInterface):
         self.tolerance = tolerance
         self.lap_time = lap_time
         self.collect_data = collect_data
+        self.plot = plot
         self.robot_id = self.robot_ids[0]
 
         # weights for MPC cost terms
         self.swarm_weight = 0.0
-        self.perp_weight = 2.
-        self.heading_weight = 0.5
-        self.forward_weight = 0.0
-        self.dist_weight = 30.
+        # self.perp_weight = 15.
+        # self.heading_weight = 0.5
+        # self.dist_weight = 50.
+        self.perp_weight = 4.
+        self.heading_weight = 0.8
+        self.dist_weight = 3.0
         self.norm_weight = 0.0
+        self.dist_bonus_factor = 10.
 
         # self.swarm_weight = 0.0
         # self.perp_weight = 2.0
         # self.heading_weight = 0.01
-        # self.forward_weight = 0.0
         # self.dist_weight = 20.
         # self.norm_weight = 0.0
 
@@ -54,7 +57,6 @@ class RealMPC(KamigamiInterface):
         self.logged_transitions = 0
         self.laps = 0
         self.n_prints = 0
-        self.started = False
         
         np.set_printoptions(suppress=True)
 
@@ -98,17 +100,18 @@ class RealMPC(KamigamiInterface):
             if self.started:
                 self.plot_states.append(self.current_states.squeeze().copy())
                 self.plot_goals.append(self.last_goal.copy())
-                # plot_goals = np.array(self.plot_goals)
-                # plot_states = np.array(self.plot_states)
-                # plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-                # plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
-                # if self.first_plot:
-                #     plt.legend()
-                #     plt.ion()
-                #     plt.show()
-                #     self.first_plot = False
-                # plt.draw()
-                # plt.pause(0.0001)
+                if self.plot:
+                    plot_goals = np.array(self.plot_goals)
+                    plot_states = np.array(self.plot_states)
+                    plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+                    plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+                    if self.first_plot:
+                        plt.legend()
+                        plt.ion()
+                        plt.show()
+                        self.first_plot = False
+                    plt.draw()
+                    plt.pause(0.0001)
 
             if self.dist_to_start() < self.tolerance and not self.started:
                 self.started = True
@@ -146,9 +149,10 @@ class RealMPC(KamigamiInterface):
         else:
             action = self.agent.mpc_action(state, last_goal, goal,
                                     self.action_range, swarm=False, n_steps=self.mpc_steps,
-                                    n_samples=self.mpc_samples, swarm_weight=self.swarm_weight, perp_weight=self.perp_weight,
-                                    heading_weight=self.heading_weight, forward_weight=self.forward_weight,
-                                    dist_weight=self.dist_weight, norm_weight=self.norm_weight, which=which).detach().numpy()
+                                    n_samples=self.mpc_samples, swarm_weight=self.swarm_weight,
+                                    perp_weight=self.perp_weight, heading_weight=self.heading_weight,
+                                    dist_weight=self.dist_weight, norm_weight=self.norm_weight, dist_bonus_factor=self.dist_bonus_factor,
+                                    which=which).detach().numpy()
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
@@ -197,7 +201,9 @@ class RealMPC(KamigamiInterface):
         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, goal, current=True, signed=True)
         dist_loss, heading_loss, perp_loss = [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss]]
         ctrl_array = np.array([[0.5, 0.5], [0.5, -0.5]])
-        error_array = np.array([dist_loss * 15.0, (perp_loss * 15.0 + heading_loss * 4.0)]) * 1.4
+        print("DIST: ", dist_loss)
+        print("HEAD: ", heading_loss)
+        error_array = np.array([dist_loss * 15.0, (perp_loss * 15.0 + heading_loss * 4.0)]) * 1.0
         left_pwm, right_pwm = ctrl_array @ error_array
         return np.array([left_pwm, right_pwm])
 
@@ -276,7 +282,8 @@ if __name__ == '__main__':
     parser.add_argument('-tolerance', type=float, default=0.05)
     parser.add_argument('-collect_data', action='store_true')
     parser.add_argument('-lap_time', type=float)
-    parser.add_argument('-calibrate', action="store_true")
+    parser.add_argument('-calibrate', action='store_true')
+    parser.add_argument('-plot', action='store_true')
 
     args = parser.parse_args()
 
@@ -305,5 +312,5 @@ if __name__ == '__main__':
     else:
         raise ValueError
 
-    r = RealMPC(args.robot_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data, args.calibrate)
+    r = RealMPC(args.robot_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data, args.calibrate, args.plot)
     r.run()

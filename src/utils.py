@@ -17,7 +17,7 @@ class KamigamiInterface:
         self.save_path = save_path
         self.robot_ids = np.array(robot_ids)
 
-        max_pwm = 0.999
+        max_pwm = 0.9
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
         self.duration = 0.2
         self.current_states = np.zeros((len(self.robot_ids), 4))    # (x, y, theta, id)
@@ -32,6 +32,7 @@ class KamigamiInterface:
         self.n_updates = 0
         self.last_n_updates = 0
         self.not_found = False
+        self.started = False
         
         self.n_avg_states = 1
         self.n_wait_updates = 1
@@ -44,11 +45,6 @@ class KamigamiInterface:
         self.actions = []
         self.next_states = []
         self.done = False
-
-        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
-        if not os.path.exists(self.tag_offset_path) or calibrate:
-            self.calibrate()
-        self.tag_offsets = np.load(self.tag_offset_path)
 
         rospy.init_node("kamigami_interface")
 
@@ -63,6 +59,11 @@ class KamigamiInterface:
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_states, queue_size=1)
         print("subscribed to /ar_pose_marker")
 
+        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
+        if not os.path.exists(self.tag_offset_path) or calibrate:
+            self.calibrate()
+        self.tag_offsets = np.load(self.tag_offset_path)
+
     @abstractmethod
     def step(self):
         pass
@@ -72,7 +73,11 @@ class KamigamiInterface:
         pass
 
     def calibrate(self):
-        tag_offsets = np.zeros(10)
+        if os.path.exists(self.tag_offset_path):
+            tag_offsets = np.load(self.tag_offset_path)
+        else:
+            tag_offsets = np.zeros(10)
+
         for id in self.robot_ids:
             robot_idx = np.argwhere(self.robot_ids == id).squeeze().item()
             input(f"Place robot {id} on the left calibration point, aligned with the calibration line and hit enter.")
@@ -81,8 +86,9 @@ class KamigamiInterface:
             right_state = self.get_states(wait=False)[robot_idx]
 
             true_vector = (left_state - right_state)[:2]
-            true_angle = np.arctan2(true_vector[0], true_vector[1])
-            measured_angle = 0.5 * (left_state + right_state)[2]
+            true_angle = np.arctan2(true_vector[1], true_vector[0])
+            # measured_angle = 0.5 * (left_state + right_state)[2]
+            measured_angle = left_state[2]
 
             tag_offsets[id] = true_angle - measured_angle
         
@@ -102,7 +108,7 @@ class KamigamiInterface:
             o_list = [o.x, o.y, o.z, o.w]
             x, y, z = euler_from_quaternion(o_list)
 
-            if abs(np.sin(x)) > self.flat_lim or abs(np.sin(y)) > self.flat_lim:
+            if abs(np.sin(x)) > self.flat_lim or abs(np.sin(y)) > self.flat_lim and self.started:
                 print("MARKER NOT FLAT ENOUGH")
                 print("sin(x):", np.sin(x), "|| sin(y)", np.sin(y))
                 self.not_found = True
