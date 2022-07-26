@@ -41,10 +41,11 @@ class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True, multi=False):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth > 1
-        layers = [nn.Linear(input_dim, hidden_dim), nn.ReLU(inplace=True)]
         layers = []
         for i in range(hidden_depth - 1):
-            layers += [nn.utils.spectral_norm(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))]
+            layers += [nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)]
+            # layers += [nn.utils.spectral_norm(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))]
+            # layers += [nn.GELU()]
             layers += [nn.ReLU(inplace=True)]
             layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
             layers += [nn.Dropout(p=dropout)]
@@ -111,9 +112,7 @@ class DynamicsNetwork(nn.Module):
             state_action = torch.cat([state_action, id], dim=-1).float()
 
         if self.dist:
-            mean_std = self.model(state_action)
-            mean = mean_std[:, :self.output_dim]
-            std = mean_std[:, self.output_dim:]
+            mean, std = self.model(state_action).chunk(2, dim=-1)
             std = torch.clamp(std, min=1e-6)
             return torch.distributions.normal.Normal(mean, std)
         else:
@@ -409,7 +408,8 @@ class MPCAgent:
         next_states_sc = torch.cat([next_states[:, :-1], sc], dim=-1)
         states_delta = next_states_sc - states_sc
 
-        n_test = 140
+        # n_test = 200 if self.multi else 100
+        n_test = 50
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=n_test, random_state=self.seed)
@@ -426,16 +426,9 @@ class MPCAgent:
                 train_actions = actions[train_idx]
                 train_states_delta = states_delta[train_idx]
 
-            if self.ensemble > 1:
-                rand_idx = torch.randint(0, len(train_states), (len(train_states),))
-                import pdb;pdb.set_trace()
-                train_states = train_states[rand_idx]
-                train_actions = train_actions[rand_idx]
-                train_states_delta = train_states_delta[rand_idx]
-
             if self.multi:
                 if use_all_data:
-                    train_ids = all_ids
+                    train_ids, test_ids = all_ids, all_ids[test_idx]
                 else:
                     train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
             else:
