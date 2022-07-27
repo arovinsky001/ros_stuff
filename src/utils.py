@@ -40,6 +40,7 @@ class KamigamiInterface:
         self.n_clip = 3
         self.flat_lim = 0.6
         self.save_freq = 10
+        self.remap = True
 
         self.states = []
         self.actions = []
@@ -206,3 +207,30 @@ class KamigamiInterface:
         self.states = []
         self.actions = []
         self.next_states = []
+
+    def get_new_pwm(self, pwm, before, after):
+        if pwm < before:
+            new_pwm = pwm * after / before
+        else:
+            new_pwm = (pwm - before) / before * (1 - after) + after
+        return np.clip(new_pwm, *self.action_range[:, 0])
+
+    def remap_cmd(self, cmd, robot):
+        if self.remap:
+            left_pwm, right_pwm = cmd.left_pwm, cmd.right_pwm
+            if robot == 0:
+                before_left = 0.5
+                after_left = 0.8
+                before_right = 0.7
+                after_right = 0.4
+            elif robot == 2:
+                before_left = 0.3
+                after_left = 0.6
+                before_right = 0.6
+                after_right = 0.9
+            else:
+                raise ValueError
+
+            cmd.left_pwm = self.get_new_pwm(left_pwm, before_left, after_left)
+            cmd.right_pwm = self.get_new_pwm(right_pwm, before_right, after_right)
+        return cmd

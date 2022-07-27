@@ -159,6 +159,7 @@ class RealMPC(KamigamiInterface):
         action_req.left_pwm = action[0]
         action_req.right_pwm = action[1]
         action_req.duration = self.duration
+        action_req = self.remap_cmd(action_req, self.robot_id)
 
         self.service_proxies[0](action_req, f"kami{self.robot_id}")
         self.time_elapsed += action_req.duration if self.started else 0
