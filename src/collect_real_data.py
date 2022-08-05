@@ -65,7 +65,7 @@ class DataCollector(KamigamiInterface):
             req.right_pwm = actions[i, 1]
             req.duration = self.duration
             actions[i, -1] = self.robot_ids[i]
-            req = self.remap_cmd(req, self.robot_ids[i])
+            self.remap_cmd(req, self.robot_ids[i])
         
         for i, proxy in enumerate(self.service_proxies):
             proxy(reqs[i], f'kami{self.robot_ids[i]}')
