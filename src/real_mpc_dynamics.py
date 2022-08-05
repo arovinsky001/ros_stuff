@@ -160,7 +160,7 @@ class DynamicsNetwork(nn.Module):
                 np_type = False
                 arglist[i] = dcn(arg)
         if len(arglist) == 3:
-            # This means args are state and action
+            # this means args are state, action, id i.e. inputs
             states, actions, ids = arglist
             if len(states.shape) == 1:
                 states = states[None, :]
@@ -183,13 +183,15 @@ class DynamicsNetwork(nn.Module):
             if ids is not None:
                 return states_scaled, actions_scaled, ids_scaled
             return states_scaled, actions_scaled, None
-        else:
-            # This means args is states_delta
+        elif len(arglist) == 1:
+            # this means args is states_delta i.e. outputs
             states_delta = arglist[0]
             states_delta_scaled = self.output_scaler.transform(states_delta)
             if not np_type:
                 states_delta_scaled = to_tensor(states_delta_scaled)
             return states_delta_scaled
+        else:
+            raise ValueError
 
 
 class MPCAgent:
@@ -208,8 +210,8 @@ class MPCAgent:
         self.ensemble = ensemble
 
     def mpc_action(self, state, prev_goal, goal, action_range, swarm=False, n_steps=10, n_samples=1000,
-                   swarm_weight=0.0, perp_weight=0.0, heading_weight=0.0, forward_weight=0.0, dist_weight=0.0, norm_weight=0.0,
-                   which=-1):
+                   swarm_weight=0.0, perp_weight=0.0, heading_weight=0.0, dist_weight=0.0, norm_weight=0.0,
+                   dist_bonus_factor=1.0, which=-1):
         all_actions = np.random.uniform(*action_range, size=(n_steps, n_samples, action_range.shape[-1]))
         state, prev_goal, goal, all_actions = to_tensor(state, prev_goal, goal, all_actions)
         self.state = state      # for multi-robot
@@ -231,13 +233,15 @@ class MPCAgent:
                 else:
                     states = to_tensor(self.get_prediction(states, actions, sample=False, scale=True, use_ensemble=True), requires_grad=False)
    
-            dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, actions=actions, swarm=swarm)
+            dist_loss, heading_loss, perp_loss, norm_loss, swarm_loss, norm_const = self.compute_losses(states, prev_goal, goal, actions=actions, swarm=swarm)
 
             # normalize appropriate losses and compute total loss
             norm_const = 1
-            all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
-                                + swarm_weight * swarm_loss + norm_weight * norm_loss) \
-                                + dist_weight * dist_loss + forward_weight * forward_loss
+            all_losses[i] = (dist_weight + perp_weight * perp_loss + heading_weight * heading_loss) * dist_loss
+            # all_losses[i] = norm_const * (perp_weight * perp_loss + heading_weight * heading_loss \
+            #                     + swarm_weight * swarm_loss + norm_weight * norm_loss) \
+            #                     + dist_weight * dist_loss
+            # all_losses[i, dist_loss < 0.1] /= dist_bonus_factor
         
         # find index of best trajectory and return corresponding first action
         best_idx = all_losses.sum(dim=0).argmin()
@@ -256,7 +260,6 @@ class MPCAgent:
             goals = torch.tile(goal, (n_samples, 1))
             vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
 
-        optimal_dot = vec_to_goal / vec_to_goal.norm()
         perp_denom = vec_to_goal.norm()
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
@@ -268,12 +271,12 @@ class MPCAgent:
         angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
         angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0)[0]
 
-        left = (angle_diff_side > torch.pi) * 2 - 1.
-        forward = (angle_diff_dir > torch.pi / 2) * 2 - 1.
+        left = (angle_diff_side < torch.pi) * 2 - 1.
+        forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
 
         heading_loss = angle_diff_dir
 
-        heading_loss[forward == 1] = (heading_loss[forward == 1] + torch.pi) % (2 * torch.pi)
+        heading_loss[forward == -1] = (heading_loss[forward == -1] + torch.pi) % (2 * torch.pi)
         heading_loss, _ = torch.stack((heading_loss, 2 * torch.pi - heading_loss)).min(dim=0)
         if signed:
             heading_loss *= left * forward
@@ -286,7 +289,7 @@ class MPCAgent:
 
             angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
             angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0)[0]
-            forward = (angle_diff_dir > torch.pi / 2) * 2 - 1.
+            forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
             dist_loss *= forward
 
         # perp loss
@@ -297,12 +300,11 @@ class MPCAgent:
         if current:
             return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze()
 
-        forward_loss = torch.abs(optimal_dot @ vecs_to_goal.T).squeeze()
         norm_loss = -actions[:, :-1].norm(dim=-1).squeeze()
         swarm_loss = self.swarm_loss(states, goals).squeeze() if swarm else 0.0
         norm_const = dist_loss.mean()
 
-        return dist_loss, heading_loss, perp_loss, forward_loss, norm_loss, swarm_loss, norm_const
+        return dist_loss, heading_loss, perp_loss, norm_loss, swarm_loss, norm_const
     
     def get_prediction(self, states_xy, actions, ids=None, scale=False, sample=False, delta=False, use_ensemble=False, model_no=0):
         """
@@ -390,6 +392,15 @@ class MPCAgent:
         loss = neighbor_dists.mean(dim=0) * goal_term.mean()
         return loss
 
+    def convert_sc_delta(self, states, next_states):
+        states, next_states = to_tensor(states, next_states)
+        states_sc = torch.stack([torch.sin(states[:, -1]), torch.cos(states[:, -1])], dim=1)
+        states_sc_appended = torch.cat([states[:, :-1], states_sc], dim=-1)
+        next_states_sc = torch.stack([torch.sin(next_states[:, -1]), torch.cos(next_states[:, -1])], dim=1)
+        next_states_sc_appended = torch.cat([next_states[:, :-1], next_states_sc], dim=-1)
+        states_delta = next_states_sc_appended - states_sc_appended
+        return states_sc, states_delta
+    
     def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         states, actions, next_states = to_tensor(states, actions, next_states)
 
@@ -402,11 +413,7 @@ class MPCAgent:
             actions = actions.reshape(-1, actions.shape[-1])
             next_states = next_states.reshape(-1, next_states.shape[-1])
 
-        sc = torch.stack([torch.sin(states[:, -1]), torch.cos(states[:, -1])], dim=1)
-        states_sc = torch.cat([states[:, :-1], sc], dim=-1)
-        sc = torch.stack([torch.sin(next_states[:, -1]), torch.cos(next_states[:, -1])], dim=1)
-        next_states_sc = torch.cat([next_states[:, :-1], sc], dim=-1)
-        states_delta = next_states_sc - states_sc
+        states, states_delta = self.convert_sc_delta(states, next_states)
 
         # n_test = 200 if self.multi else 100
         n_test = 50
@@ -433,8 +440,6 @@ class MPCAgent:
                     train_ids, test_ids = all_ids[train_idx], all_ids[test_idx]
             else:
                 train_ids, test_ids = None, None
-
-            train_states = torch.stack([torch.sin(train_states[:, -1]), torch.cos(train_states[:, -1])], dim=1)
 
             if set_scalers:
                 model.set_scalers(train_states, train_actions, train_states_delta, train_ids)
@@ -572,9 +577,9 @@ if __name__ == '__main__':
     
     print('\nDATA LOADED\n')
     
-    states = data['states']
-    actions = data['actions']
-    next_states = data['next_states']
+    states = data['states'][:500]
+    actions = data['actions'][:500]
+    next_states = data['next_states'][:500]
 
     if states.shape[1] == 2:
         assert np.all(states[:, 1, -1] == 2) and np.all(actions[:, 1, -1] == 2) and np.all(next_states[:, 1, -1] == 2)

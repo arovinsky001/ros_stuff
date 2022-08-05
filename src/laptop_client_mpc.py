@@ -14,8 +14,15 @@ SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_on
 
 class RealMPC(KamigamiInterface):
     def __init__(self, robot_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate, plot):
-        with open(agent_path, "rb") as f:
-            self.agent = pkl.load(f)
+        # with open(agent_path, "rb") as f:
+        #     self.agent = pkl.load(f)
+        input_dim = 4
+        output_dim = 4
+        self.agent = MPCAgent(input_dim, output_dim, seed=0, dist=False,
+                         scale=False, multi=False, hidden_dim=250,
+                         hidden_depth=4, lr=0.001,
+                         dropout=0.4, entropy_weight=0.0, ensemble=1)
+
         super().__init__([robot_id], SAVE_PATH, calibrate)
         self.define_goal_trajectory()
 
@@ -61,8 +68,10 @@ class RealMPC(KamigamiInterface):
         np.set_printoptions(suppress=True)
 
     def define_goal_trajectory(self):
-        self.front_left_corner = np.array([-0.3, -1.0])
-        self.back_right_corner = np.array([-1.45, 0.0])
+        # self.front_left_corner = np.array([-0.3, -1.0])
+        # self.back_right_corner = np.array([-1.45, 0.0])
+        self.front_left_corner = np.array([-0.1, -1.25])
+        self.back_right_corner = np.array([-1.95, 0.1])
         corner_range = self.back_right_corner - self.front_left_corner
 
         # radius_rel = 0.3
@@ -132,6 +141,7 @@ class RealMPC(KamigamiInterface):
         action = self.get_take_actions(state[:-1])
 
         self.collect_training_data(state, action)
+        self.update_model_online()
         self.check_rollout_finished()
     
     def get_take_actions(self, state):
@@ -229,6 +239,16 @@ class RealMPC(KamigamiInterface):
     def check_rollout_finished(self):
         if self.time_elapsed > self.lap_time:
             self.laps += 1
+            # Print current cumulative loss per lap completed
+            dist_losses, heading_losses, perp_losses, total_losses = self.losses.T
+            data = np.array([[dist_losses.mean(), dist_losses.std(), dist_losses.min(), dist_losses.max()],
+                         [perp_losses.mean(), perp_losses.std(), perp_losses.min(), perp_losses.max()],
+                         [heading_losses.mean(), heading_losses.std(), heading_losses.min(), heading_losses.max()],
+                         [total_losses.mean(), total_losses.std(), total_losses.min(), total_losses.max()]])
+            print("lap:", self.laps)
+            print("rows: (dist, perp, heading, total)")
+            print("cols: (mean, std, min, max)")
+            print("DATA:", data, "\n")
             self.time_elapsed = 0.
             
             self.started = False
@@ -263,14 +283,34 @@ class RealMPC(KamigamiInterface):
         print("DATA:", data, "\n")
 
     def collect_training_data(self, state, action):
-        if self.started and self.collect_data:
-            next_state = self.get_states()
-            self.states.append(state)
-            self.actions.append(action)
-            self.next_states.append(next_state)
-            self.logged_transitions += 1
-            if self.logged_transitions % self.save_freq == 0:
-                self.save_training_data()
+        # if self.started and self.collect_data:
+        if self.collect_data:
+            next_state = self.get_states().squeeze()[:-1]
+            self.replay_buffer.add(state.squeeze()[:-1], action, next_state)
+
+            # self.states.append(state)
+            # self.actions.append(action)
+            # self.next_states.append(next_state)
+            # self.logged_transitions += 1
+            # if self.logged_transitions % self.save_freq == 0:
+            #     self.save_training_data()
+    
+    # currently only supports one robot
+    def update_model_online(self):
+        if self.replay_buffer.full or self.replay_buffer.idx > 10:
+            # sample from buffer
+            states, actions, next_states = self.replay_buffer.sample(150)
+            print(self.replay_buffer.idx)
+            states, states_delta = self.agent.convert_sc_delta(states, next_states)
+
+            # # scale
+            # states, actions, _ = self.agent.get_scaled(states, actions, None)
+            # states_delta = self.agent.get_scaled(states_delta)
+
+            # take single gradient step
+            for model in self.agent.models:
+                model.update(states, actions, states_delta)
+
 
 
 if __name__ == '__main__':

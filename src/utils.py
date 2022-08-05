@@ -6,9 +6,12 @@ from abc import abstractmethod
 import numpy as np
 import rospy
 
-from ar_track_alvar_msgs.msg import AlvarMarkers
+from replay_buffer import ReplayBuffer
+
 from ros_stuff.srv import CommandAction
 from ros_stuff.msg import RobotCmd
+
+from ar_track_alvar_msgs.msg import AlvarMarkers
 from tf.transformations import euler_from_quaternion
 
 
@@ -17,7 +20,7 @@ class KamigamiInterface:
         self.save_path = save_path
         self.robot_ids = np.array(robot_ids)
 
-        max_pwm = 0.9
+        max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
         self.duration = 0.2
         self.current_states = np.zeros((len(self.robot_ids), 4))    # (x, y, theta, id)
@@ -40,7 +43,9 @@ class KamigamiInterface:
         self.n_clip = 3
         self.flat_lim = 0.6
         self.save_freq = 10
-        self.remap = True
+        self.remap = False
+
+        self.replay_buffer = ReplayBuffer(capacity=400, state_dim=3, action_dim=2, next_state_dim=3)
 
         self.states = []
         self.actions = []
