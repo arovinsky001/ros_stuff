@@ -260,6 +260,8 @@ class MPCAgent:
             goals = torch.tile(goal, (n_samples, 1))
             vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
 
+        states = states[:, 3:]      # only object state matters for goal
+
         perp_denom = vec_to_goal.norm()
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
@@ -394,13 +396,29 @@ class MPCAgent:
 
     def convert_sc_delta(self, states, next_states):
         states, next_states = to_tensor(states, next_states)
-        states_sc = torch.stack([torch.sin(states[:, -1]), torch.cos(states[:, -1])], dim=1)
-        states_sc_appended = torch.cat([states[:, :-1], states_sc], dim=-1)
-        next_states_sc = torch.stack([torch.sin(next_states[:, -1]), torch.cos(next_states[:, -1])], dim=1)
-        next_states_sc_appended = torch.cat([next_states[:, :-1], next_states_sc], dim=-1)
-        states_delta = next_states_sc_appended - states_sc_appended
-        return states_sc, states_delta
-    
+        robot_theta, object_theta = states[:, 2], states[:, 5]
+        robot_xy, object_xy = states[:, :2], states[:, 3:5]
+        robot_next_theta, object_next_theta = next_states[:, 2], next_states[:, 5]
+
+        robot_sc = torch.stack([torch.sin(robot_theta), torch.cos(robot_theta)], dim=1)
+        object_sc = torch.stack([torch.sin(object_theta), torch.cos(object_theta)], dim=1)
+        robot_xysc = torch.cat([robot_xy, robot_sc], dim=-1)
+        object_xysc = torch.cat([object_xy, object_sc], dim=-1)
+
+        robot_next_sc = torch.stack([torch.sin(robot_next_theta), torch.cos(robot_next_theta)], dim=1)
+        object_next_sc = torch.stack([torch.sin(object_next_theta), torch.cos(object_next_theta)], dim=1)
+        robot_next_xysc = torch.cat([robot_xy, robot_next_sc], dim=-1)
+        object_next_xysc = torch.cat([object_xy, object_next_sc], dim=-1)
+
+        robot_states_delta = robot_next_xysc - robot_xysc
+        object_states_delta = object_next_xysc - object_xysc
+        states_delta = np.concatenate((robot_states_delta, object_states_delta), dim=-1)
+
+        obj_to_robot_xysc = robot_xysc - object_xysc
+        full_states = np.concatenate((robot_sc, obj_to_robot_xysc))
+
+        return full_states, states_delta
+
     def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         states, actions, next_states = to_tensor(states, actions, next_states)
 
@@ -416,7 +434,7 @@ class MPCAgent:
         states, states_delta = self.convert_sc_delta(states, next_states)
 
         # n_test = 200 if self.multi else 100
-        n_test = 50
+        n_test = 100
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_states_delta, test_states_delta, \
                 train_idx, test_idx = train_test_split(states, actions, states_delta, idx, test_size=n_test, random_state=self.seed)
@@ -609,18 +627,31 @@ if __name__ == '__main__':
             actions = actions.squeeze()
             next_states = next_states.squeeze()
 
-        # states = states[:-2]
-        # actions_shift_0 = actions[:-2]
-        # actions_shift_1 = actions[1:-1]
-        # actions_shift_2 = actions[2:]
-        # actions = np.concatenate([actions_shift_0, actions_shift_1, actions_shift_2], axis=-1)
-        # next_states = next_states[2:]
+    # rand_idx = np.random.permutation(len(states))
+    # states = states[rand_idx]
+    # actions = actions[rand_idx]
+    # next_states = next_states[rand_idx]
 
-        # states = states[:-1]
-        # actions_shift_0 = actions[:-1]
-        # actions_shift_1 = actions[1:]
-        # actions = np.concatenate([actions_shift_0, actions_shift_1], axis=-1)
-        # next_states = next_states[1:]
+    # final_test_states = states[:100]
+    # states = states[100:]
+    # final_test_actions = actions[:100]
+    # actions = actions[100:]
+    # final_next_states = next_states[:100]
+    # next_states = next_states[100:]
+
+    # predict using multiple actions, assumes steps are sequential
+    # states = states[:-2]
+    # actions_shift_0 = actions[:-2]
+    # actions_shift_1 = actions[1:-1]
+    # actions_shift_2 = actions[2:]
+    # actions = np.concatenate([actions_shift_0, actions_shift_1, actions_shift_2], axis=-1)
+    # next_states = next_states[2:]
+
+    # states = states[:-1]
+    # actions_shift_0 = actions[:-1]
+    # actions_shift_1 = actions[1:]
+    # actions = np.concatenate([actions_shift_0, actions_shift_1], axis=-1)
+    # next_states = next_states[1:]
 
     if args.retrain:
         online_data = np.load("../../sim/data/real_data_online400.npz")
@@ -672,27 +703,14 @@ if __name__ == '__main__':
         for i, (x, y) in enumerate(zip(states_x, states_y)):
             if i == 0:
                 continue
-            plt.annotate(f"{i-1}", # this is the text
-                        (x,y), # these are the coordinates to position the label
-                        textcoords="offset points", # how to position the text
-                        xytext=(0,10), # distance from text to points (x,y)
-                        ha='center') # horizontal alignment can be left, right or center
-            
-            plt.annotate(str(actions_plot[i]), # this is the text
-                        (x,y), # these are the coordinates to position the label
-                        textcoords="offset points", # how to position the text
-                        xytext=(-10,-10), # distance from text to points (x,y)
-                        ha='center') # horizontal alignment can be left, right or center
+            plt.annotate(f"{i-1}", (x, y), textcoords="offset points", xytext=(0, 10), ha='center')
+            plt.annotate(str(actions_plot[i]), textcoords="offset points", xytext=(-10, -10), ha='center')
 
         for i, (x, y) in enumerate(zip(next_states_x, next_states_y)):
             if i == len(next_states_x) - 1:
                 continue
             label = f"{i}"
-            plt.annotate(label, # this is the text
-                        (x,y), # these are the coordinates to position the label
-                        textcoords="offset points", # how to position the text
-                        xytext=(0,10), # distance from text to points (x,y)
-                        ha='center') # horizontal alignment can be left, right or center
+            plt.annotate(label, (x, y), textcoords="offset points", xytext=(0, 10), ha='center')
 
         plt.show()
     
@@ -853,19 +871,11 @@ if __name__ == '__main__':
         plt.plot(states[start:end, 0], states[start:end, 1], color="purple", linewidth=1.0, label="Actual Trajectory")
 
         for i, (x, y) in enumerate(zip(slist[:, 0], slist[:, 1])):
-            plt.annotate(f"{i}", # this is the text
-                        (x,y), # these are the coordinates to position the label
-                        textcoords="offset points", # how to position the text
-                        xytext=(0,10), # distance from text to points (x,y)
-                        ha='center') # horizontal alignment can be left, right or center
+            plt.annotate(f"{i}", (x, y), textcoords="offset points", xytext=(0, 10), ha='center')
 
         for i, (x, y) in enumerate(zip(states[start:end, 0], states[start:end, 1])):
             label = f"{i}"
-            plt.annotate(label, # this is the text
-                        (x,y), # these are the coordinates to position the label
-                        textcoords="offset points", # how to position the text
-                        xytext=(0,10), # distance from text to points (x,y)
-                        ha='center') # horizontal alignment can be left, right or center
+            plt.annotate(label, (x, y), textcoords="offset points", xytext=(0, 10), ha='center')
 
         plt.legend()
         plt.show()

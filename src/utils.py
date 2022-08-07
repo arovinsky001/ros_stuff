@@ -115,7 +115,7 @@ class KamigamiInterface:
             x, y, z = euler_from_quaternion(o_list)
 
             if abs(np.sin(x)) > self.flat_lim or abs(np.sin(y)) > self.flat_lim and self.started:
-                print("MARKER NOT FLAT ENOUGH")
+                print(f"ROBOT {marker.id} MARKER NOT FLAT ENOUGH")
                 print("sin(x):", np.sin(x), "|| sin(y)", np.sin(y))
                 self.not_found = True
                 return
@@ -127,7 +127,7 @@ class KamigamiInterface:
             state[1] = marker.pose.pose.position.y
             state[2] = z % (2 * np.pi)
             state[3] = marker.id
-        
+
         self.not_found = not np.all(found_robots)
         self.n_updates += 0 if self.not_found else 1
 
