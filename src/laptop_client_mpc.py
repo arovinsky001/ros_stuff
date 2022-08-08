@@ -15,20 +15,12 @@ from tf.transformations import euler_from_quaternion
 SAVE_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/real_data_online400.npz"
 
 class RealMPC(KamigamiInterface):
-    def __init__(self, robot_id, object_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate, plot):
-        # with open(agent_path, "rb") as f:
-        #     self.agent = pkl.load(f)
-        input_dim = 8       # 4
-        output_dim = 8      # 4
-        self.agent = MPCAgent(input_dim, output_dim, seed=0, dist=False,
-                         scale=False, multi=False, hidden_dim=250,
-                         hidden_depth=4, lr=0.001,
-                         dropout=0.4, entropy_weight=0.0, ensemble=1)
-
+    def __init__(self, robot_id, object_id, agent_path, mpc_steps, mpc_samples, model, n_rollouts, tolerance, lap_time, collect_data, calibrate, plot, new_buffer):
+        self.halted = False
         self.object_id = object_id
         self.object_state = np.zeros(3)    # (x, y, theta)
 
-        super().__init__([robot_id], SAVE_PATH, calibrate)
+        super().__init__([robot_id], SAVE_PATH, calibrate, new_buffer=new_buffer)
         self.define_goal_trajectory()
 
         self.mpc_steps = mpc_steps
@@ -42,12 +34,19 @@ class RealMPC(KamigamiInterface):
         self.robot_id = self.robot_ids[0]
 
         # weights for MPC cost terms
+        # self.swarm_weight = 0.0
+        # self.perp_weight = 4.
+        # self.heading_weight = 0.8
+        # self.dist_weight = 3.0
+        # self.norm_weight = 0.0
+        # self.dist_bonus_factor = 10.
+
         self.swarm_weight = 0.0
-        self.perp_weight = 4.
-        self.heading_weight = 0.8
-        self.dist_weight = 3.0
+        self.perp_weight = 0.
+        self.heading_weight = 0.
+        self.dist_weight = 1.0
         self.norm_weight = 0.0
-        self.dist_bonus_factor = 10.
+        self.dist_bonus_factor = 0.
 
         self.plot_states = []
         self.plot_goals = []
@@ -60,14 +59,32 @@ class RealMPC(KamigamiInterface):
         self.logged_transitions = 0
         self.laps = 0
         self.n_prints = 0
+
+        # with open(agent_path, "rb") as f:
+        #     self.agent = pkl.load(f)
+        input_dim = 8       # 4
+        output_dim = 8      # 4
+        self.agent = MPCAgent(input_dim, output_dim, seed=0, dist=False,
+                         scale=True, multi=False, hidden_dim=500,
+                         hidden_depth=4, lr=0.001,
+                         dropout=0.3, entropy_weight=0.0, ensemble=1)
         
+        idx = self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx
+        states = self.replay_buffer.states[:idx]
+        actions = self.replay_buffer.actions[:idx]
+        next_states = self.replay_buffer.next_states[:idx]
+        self.agent.train(states, actions, next_states, set_scalers=True, epochs=100, batch_size=1000, use_all_data=True)
+        
+        for g in self.agent.models[0].optimizer.param_groups:
+            g['lr'] = 1e-4
+
         np.set_printoptions(suppress=True)
 
     def define_goal_trajectory(self):
         # self.front_left_corner = np.array([-0.3, -1.0])
         # self.back_right_corner = np.array([-1.45, 0.0])
-        self.front_left_corner = np.array([-0.1, -1.25])
-        self.back_right_corner = np.array([-1.95, 0.1])
+        self.front_left_corner = np.array([-0.1, -1.15])
+        self.back_right_corner = np.array([-1.9, 0.1])
         corner_range = self.back_right_corner - self.front_left_corner
 
         # radius_rel = 0.3
@@ -80,6 +97,8 @@ class RealMPC(KamigamiInterface):
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
     def update_states(self, msg):
+        if self.halted:
+            return
         # update object state
         object_found = False
         for marker in msg.markers:
@@ -88,7 +107,8 @@ class RealMPC(KamigamiInterface):
                 o_list = [o.x, o.y, o.z, o.w]
                 x, y, z = euler_from_quaternion(o_list)
 
-                if abs(np.sin(x)) > self.flat_lim or abs(np.sin(y)) > self.flat_lim and self.started:
+                flat_lim = 0.7
+                if abs(np.sin(x)) > flat_lim or abs(np.sin(y)) > flat_lim and self.started:
                     print("OBJECT MARKER NOT FLAT ENOUGH")
                     print("sin(x):", np.sin(x), "|| sin(y)", np.sin(y))
                     self.not_found = True
@@ -112,8 +132,8 @@ class RealMPC(KamigamiInterface):
         if self.not_found:
             return
 
-        state = self.current_states.squeeze()[:-1]
-        last_goal = self.last_goal if self.started else state
+        state = np.concatenate((self.current_states.squeeze()[:-1], self.object_state), axis=0)
+        last_goal = self.last_goal if self.started else self.object_state
         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(state, last_goal, self.get_goal(), current=True)
         total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
         
@@ -151,31 +171,52 @@ class RealMPC(KamigamiInterface):
                 self.last_goal = self.get_goal()
                 self.time_elapsed = self.duration / 2
 
-            self.step()
+            if not self.step():
+                self.halted = True
+                import pdb;pdb.set_trace()
+                self.halted = False
 
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
     def dist_to_start(self):
-        return np.linalg.norm((self.get_states(wait=False).squeeze()[:-1] - self.init_goal)[:2])
+        object_state = self.get_states(wait=False).squeeze()[3:]
+        return np.linalg.norm((object_state - self.init_goal)[:2])
 
     def step(self):
-        state = self.get_states(wait=self.started).squeeze()
-        action = self.get_take_actions(state[:-1])
+        state = self.get_states()
+        if state is None:
+            print("MARKERS NOT VISIBLE")
+            return False
 
-        self.collect_training_data(state, action)
+        action = self.get_take_actions(state)
+        if action is None:
+            print("MARKERS NOT VISIBLE")
+            return False
+
+        next_state = self.get_states()
+        if next_state is None:
+            print("MARKERS NOT VISIBLE")
+            return False
+
+        self.collect_training_data(state, action, next_state)
         self.update_model_online()
         self.check_rollout_finished()
 
-    def get_states(self, perturb=False, wait=True):
-        robot_state = super().get_states(perturb=perturb, wait=wait).squeeze()
+        return True
 
+    def get_states(self, perturb=False, wait=True):
+        robot_state = super().get_states(perturb=perturb, wait=wait).squeeze()[:-1]
+
+        time = rospy.get_time()
         if self.n_avg_states > 1:
             object_state = []
             while len(object_state) < self.n_avg_states:
+                if rospy.get_time() - time > 3:
+                    return None
                 if wait and self.n_updates == self.last_n_updates:
-                    rospy.sleep(0.0001)
+                    rospy.sleep(0.001)
                     continue
                 self.last_n_updates = self.n_updates
                 object_state.append(self.object_state.copy())
@@ -183,7 +224,9 @@ class RealMPC(KamigamiInterface):
             object_state = np.array(object_state).squeeze().mean(axis=0)
         else:
             while wait and self.n_updates == self.last_n_updates:
-                rospy.sleep(0.0001)
+                if rospy.get_time() - time > 3:
+                    return None
+                rospy.sleep(0.001)
             self.last_n_updates = self.n_updates
 
             object_state = self.object_state.copy().squeeze()
@@ -200,7 +243,8 @@ class RealMPC(KamigamiInterface):
             which = None
         
         goal = self.get_goal()
-        last_goal = self.last_goal if self.started else state
+        object_state = state[3:]
+        last_goal = self.last_goal if self.started else object_state
         if "control" in self.model:
             action = self.differential_drive(state, last_goal, goal)
         else:
@@ -225,15 +269,13 @@ class RealMPC(KamigamiInterface):
         bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
         idx = np.argwhere(bool_idx).squeeze().reshape(-1)
 
-        state_n = state.copy()
-        state_n[-1] *= 180 / np.pi
         self.n_prints += 1
         print(f"\n\n\n\nNO. {self.n_prints}")
         print("/////////////////////////////////////////////////")
         print("=================================================")
         print(f"RECORDING {len(idx)} LOSSES\n")
         print("GOAL:", goal)
-        print("STATE:", state_n)
+        print("STATE:", state)
         print("ACTION:", action, "\n")
         if len(idx) != 0:
             losses_to_record = self.stamped_losses[idx, 1:].squeeze()
@@ -250,7 +292,10 @@ class RealMPC(KamigamiInterface):
 
         self.last_goal = goal.copy() if self.started else None
         n_updates = self.n_updates
+        time = rospy.get_time()
         while self.n_updates - n_updates < self.n_wait_updates:
+            if rospy.get_time() - time > 3:
+                return None
             rospy.sleep(0.001)
 
         return action
@@ -329,11 +374,15 @@ class RealMPC(KamigamiInterface):
         print("cols: (mean, std, min, max)")
         print("DATA:", data, "\n")
 
-    def collect_training_data(self, state, action):
+    def collect_training_data(self, state, action, next_state):
         # if self.started and self.collect_data:
         if self.collect_data:
-            next_state = self.get_states().squeeze()[:-1]
-            self.replay_buffer.add(state.squeeze()[:-1], action, next_state)
+            self.replay_buffer.add(state, action, next_state)
+
+            if self.replay_buffer.idx % self.save_freq == 0:
+                print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.idx} TRANSITIONS\n")
+                with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "wb") as f:
+                    pkl.dump(self.replay_buffer, f)
 
             # self.states.append(state)
             # self.actions.append(action)
@@ -346,9 +395,8 @@ class RealMPC(KamigamiInterface):
     def update_model_online(self):
         if self.replay_buffer.full or self.replay_buffer.idx > 10:
             # sample from buffer
-            states, actions, next_states = self.replay_buffer.sample(150)
-            print(self.replay_buffer.idx)
-            states, states_delta = self.agent.convert_sc_delta(states, next_states)
+            states, actions, next_states = self.replay_buffer.sample(200)
+            states, states_delta = self.agent.convert_state_delta(states, next_states)
 
             # # scale
             # states, actions, _ = self.agent.get_scaled(states, actions, None)
@@ -373,6 +421,7 @@ if __name__ == '__main__':
     parser.add_argument('-lap_time', type=float)
     parser.add_argument('-calibrate', action='store_true')
     parser.add_argument('-plot', action='store_true')
+    parser.add_argument('-new_buffer', action='store_true')
 
     args = parser.parse_args()
 
@@ -401,5 +450,5 @@ if __name__ == '__main__':
     else:
         raise ValueError
 
-    r = RealMPC(args.robot_id, args.object_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data, args.calibrate, args.plot)
+    r = RealMPC(args.robot_id, args.object_id, agent_path, args.mpc_steps, args.mpc_samples, args.model, args.n_rollouts, args.tolerance, args.lap_time, args.collect_data, args.calibrate, args.plot, args.new_buffer)
     r.run()

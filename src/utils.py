@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import os
+import pickle as pkl
 from abc import abstractmethod
 
 import numpy as np
@@ -16,7 +17,7 @@ from tf.transformations import euler_from_quaternion
 
 
 class KamigamiInterface:
-    def __init__(self, robot_ids, save_path, calibrate):
+    def __init__(self, robot_ids, save_path, calibrate, new_buffer=False):
         self.save_path = save_path
         self.robot_ids = np.array(robot_ids)
 
@@ -42,10 +43,14 @@ class KamigamiInterface:
         self.max_perturb_count = 5
         self.n_clip = 3
         self.flat_lim = 0.6
-        self.save_freq = 10
+        self.save_freq = 50
         self.remap = False
 
-        self.replay_buffer = ReplayBuffer(capacity=400, state_dim=3, action_dim=2, next_state_dim=3)
+        if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
+            with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
+                self.replay_buffer = pkl.load(f)
+        else:
+            self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=6, action_dim=2, next_state_dim=6)
 
         self.states = []
         self.actions = []
