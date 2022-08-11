@@ -132,7 +132,7 @@ class MPCAgent:
             with torch.no_grad():
                 state[:, 2] %= 2 * torch.pi
                 state[:, 5] %= 2 * torch.pi
-                state = dtu.as_tensor(self.get_prediction(state, action, sample=False, scale=True, use_ensemble=False), requires_grad=False)
+                state = dtu.as_tensor(self.get_prediction(state, action, sample=False, scale=True, use_ensemble=False))
 
             dist_loss, heading_loss, perp_loss, norm_loss = self.compute_losses(state, prev_goal, goal,
                                                                                 action=action, robot_goals=robot_goals)
@@ -145,7 +145,7 @@ class MPCAgent:
         return all_actions[0, best_idx]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False):
-        state, prev_goal, goal = dtu.as_tensor(state, prev_goal, goal, requires_grad=False)
+        state, prev_goal, goal = dtu.as_tensor(state, prev_goal, goal)
         vec_to_goal = (goal - prev_goal)[:2]
 
         if current:
@@ -281,57 +281,6 @@ class MPCAgent:
         next_state = dtu.dcn(next_state)
         return next_state
 
-    def compute_next_state(self, state, state_delta):
-        """
-        Inputs:
-            state = [x, y, theta]
-            state_delta = [x, y, sin(theta), cos(theta)]
-        Output:
-            next_state = [x, y, theta]
-        """
-        xy, theta = state[:, :-1], state[:, -1]
-        sc = torch.stack((torch.sin(theta), torch.cos(theta)), dim=1)
-        xysc = torch.cat((xy, sc), dim=1)
-        next_xysc = xysc + state_delta
-        next_xy, next_sin, next_cos = next_xysc[:, :2], next_xysc[:, 2], next_xysc[:, 3]
-        next_theta = torch.atan2(next_sin, next_cos)
-        next_state = torch.cat((next_xy, next_theta[:, None]), dim=-1)
-        return next_state
-
-    def convert_state(self, state, xysc=False):
-        state = dtu.as_tensor(state)
-        robot_xy, object_xy = state[:, :2], state[:, 3:5]
-        robot_theta, object_theta = state[:, 2], state[:, 5]
-
-        robot_sc = torch.stack((torch.sin(robot_theta), torch.cos(robot_theta)), dim=1)
-        object_sc = torch.stack((torch.sin(object_theta), torch.cos(object_theta)), dim=1)
-        robot_xysc = torch.cat((robot_xy, robot_sc), dim=-1)
-        object_xysc = torch.cat((object_xy, object_sc), dim=-1)
-
-        obj_to_robot_xysc = robot_xysc - object_xysc
-        full_state = torch.cat((robot_sc, obj_to_robot_xysc), dim=-1)
-        if xysc:
-            return full_state, robot_xysc, object_xysc
-        return full_state
-
-    def convert_state_delta(self, state, next_state):
-        full_state, robot_xysc, object_xysc = dtu.convert_state(state, xysc=True)
-        next_state = dtu.as_tensor(next_state)
-
-        robot_next_theta, object_next_theta = next_state[:, 2], next_state[:, 5]
-        robot_next_xy, object_next_xy = next_state[:, :2], next_state[:, 3:5]
-
-        robot_next_sc = torch.stack([torch.sin(robot_next_theta), torch.cos(robot_next_theta)], dim=1)
-        object_next_sc = torch.stack([torch.sin(object_next_theta), torch.cos(object_next_theta)], dim=1)
-        robot_next_xysc = torch.cat([robot_next_xy, robot_next_sc], dim=-1)
-        object_next_xysc = torch.cat([object_next_xy, object_next_sc], dim=-1)
-
-        robot_state_delta = robot_next_xysc - robot_xysc
-        object_state_delta = object_next_xysc - object_xysc
-        state_delta = torch.cat((robot_state_delta, object_state_delta), dim=-1)
-
-        return full_state, state_delta
-
     def train(self, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         state, action, next_state = dtu.as_tensor(state, action, next_state)
 
@@ -464,6 +413,15 @@ if __name__ == '__main__':
     action = buffer.action[:buffer.idx-1]
     next_states = buffer.states[1:buffer.idx]
 
+    # data = np.load("/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/real_data.npz")
+    # states = data["states"]
+    # actions = data["actions"]
+    # next_states = data["next_states"]
+
+    # states = states[:, 0, :-1]
+    # actions = actions[:, 0, :-1]
+    # next_states = next_states[:, 0, :-1]
+
     if args.retrain:
         online_data = np.load("../../sim/data/real_data_online400.npz")
 
@@ -526,6 +484,7 @@ if __name__ == '__main__':
         plt.show()
 
     if args.new_agent:
+        # input_dim, output_dim = 4, 4
         input_dim = actions.shape[-1] + 6
         output_dim = 8
 
@@ -608,7 +567,7 @@ if __name__ == '__main__':
     for model in agent.models:
         model.eval()
 
-    _, state_delta = agent.convert_state_delta(states, next_states)
+    _, state_delta = dtu.convert_state_delta(states, next_states)
 
     test_states, test_actions = states[test_idx], actions[test_idx]
     test_state_delta = dtu.dcn(state_delta[test_idx])

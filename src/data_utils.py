@@ -16,11 +16,11 @@ def dcn(*args):
         ret.append(arg.detach().cpu().numpy())
     return ret if len(ret) > 1 else ret[0]
 
-def as_tensor(*args, requires_grad=True):
+def as_tensor(*args):
     ret = []
     for arg in args:
         if type(arg) == np.ndarray:
-            ret.append(torch.as_tensor(arg, requires_grad=requires_grad, dtype=torch.float))
+            ret.append(torch.as_tensor(arg, dtype=torch.float))
         else:
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
@@ -44,6 +44,10 @@ def convert_state(state, get_xysc=False):
 
     if get_xysc:
         return full_state, robot_xysc, object_xysc
+
+    # robot_xy, robot_theta = state[:, :2], state[:, 2]
+    # full_state = torch.stack((torch.sin(robot_theta), torch.cos(robot_theta)), dim=1)
+
     return full_state
 
 def convert_state_delta(state, next_state):
@@ -62,6 +66,18 @@ def convert_state_delta(state, next_state):
     robot_state_delta = robot_next_xysc - robot_xysc
     object_state_delta = object_next_xysc - object_xysc
     state_delta = torch.cat((robot_state_delta, object_state_delta), dim=-1)
+
+    # state = as_tensor(state)
+    # robot_xy, robot_theta = state[:, :2], state[:, 2]
+    # robot_sc = torch.stack((torch.sin(robot_theta), torch.cos(robot_theta)), dim=1)
+    # robot_xysc = torch.cat((robot_xy, robot_sc), dim=-1)
+
+    # robot_next_xy, robot_next_theta = next_state[:, :2], next_state[:, 2]
+    # robot_next_sc = torch.stack([torch.sin(robot_next_theta), torch.cos(robot_next_theta)], dim=1)
+    # robot_next_xysc = torch.cat([robot_next_xy, robot_next_sc], dim=-1)
+
+    # state_delta = robot_next_xysc - robot_xysc
+    # full_state = robot_sc
 
     return full_state, state_delta
 
