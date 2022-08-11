@@ -46,24 +46,24 @@ def convert_state(state, get_xysc=False):
         return full_state, robot_xysc, object_xysc
     return full_state
 
-def convert_state_delta(states, next_states):
-    next_states = as_tensor(next_states)
+def convert_state_delta(state, next_state):
+    next_state = as_tensor(next_state)
 
-    full_states, robot_xysc, object_xysc = convert_state(states, get_xysc=True)
+    full_state, robot_xysc, object_xysc = convert_state(state, get_xysc=True)
 
-    robot_next_xy, robot_next_theta = next_states[:, :2], next_states[:, 2]
+    robot_next_xy, robot_next_theta = next_state[:, :2], next_state[:, 2]
     robot_next_sc = torch.stack([torch.sin(robot_next_theta), torch.cos(robot_next_theta)], dim=1)
     robot_next_xysc = torch.cat([robot_next_xy, robot_next_sc], dim=-1)
 
-    object_next_xy, object_next_theta = next_states[:, 3:5], next_states[:, 5]
+    object_next_xy, object_next_theta = next_state[:, 3:5], next_state[:, 5]
     object_next_sc = torch.stack([torch.sin(object_next_theta), torch.cos(object_next_theta)], dim=1)
     object_next_xysc = torch.cat([object_next_xy, object_next_sc], dim=-1)
 
-    robot_states_delta = robot_next_xysc - robot_xysc
-    object_states_delta = object_next_xysc - object_xysc
-    states_delta = torch.cat((robot_states_delta, object_states_delta), dim=-1)
+    robot_state_delta = robot_next_xysc - robot_xysc
+    object_state_delta = object_next_xysc - object_xysc
+    state_delta = torch.cat((robot_state_delta, object_state_delta), dim=-1)
 
-    return full_states, states_delta
+    return full_state, state_delta
 
 def compute_next_state(state, state_delta):
     """
