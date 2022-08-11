@@ -10,32 +10,13 @@ from sklearn.model_selection import train_test_split
 
 import torch
 from torch import nn
-from torch import tensor
-from tqdm import trange, tqdm
+from tqdm import tqdm
+
+import data_utils as dtu
 
 pi = torch.pi
 device = torch.device("cpu")
 
-def dcn(*args):
-    ret = []
-    for arg in args:
-        ret.append(arg.detach().cpu().numpy())
-    return ret if len(ret) > 1 else ret[0]
-
-def to_device(*args):
-    ret = []
-    for arg in args:
-        ret.append(arg.to(device))
-    return ret if len(ret) > 1 else ret[0]
-
-def to_tensor(*args, requires_grad=True):
-    ret = []
-    for arg in args:
-        if type(arg) == np.ndarray:
-            ret.append(tensor(arg.astype('float32'), requires_grad=requires_grad))
-        else:
-            ret.append(arg)
-    return ret if len(ret) > 1 else ret[0]
 
 class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, entropy_weight=0.02, dist=True):
@@ -45,9 +26,7 @@ class DynamicsNetwork(nn.Module):
         for i in range(hidden_depth - 1):
             layers += [nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)]
             # layers += [nn.utils.spectral_norm(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))]
-            # layers += [nn.GELU()]
             layers += [nn.ReLU(inplace=True)]
-            # layers += [nn.LayerNorm(hidden_dim)]
             layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
             layers += [nn.Dropout(p=dropout)]
         layers += [nn.Linear(hidden_dim, 2 * output_dim if dist else output_dim)]
@@ -71,7 +50,7 @@ class DynamicsNetwork(nn.Module):
                 m.bias.data.fill_(0.01)
 
     def forward(self, state, action):
-        state, action = to_tensor(state, action)
+        state, action = dtu.as_tensor(state, action)
 
         if len(state.shape) == 1:
             state = state[None, :]
@@ -90,8 +69,8 @@ class DynamicsNetwork(nn.Module):
 
     def update(self, state, action, state_delta):
         self.train()
-        state, action, state_delta = to_tensor(state, action, state_delta)
-        
+        state, action, state_delta = dtu.as_tensor(state, action, state_delta)
+
         if self.dist:
             dist = self(state, action)
             pred_state_delta = dist.rsample()
@@ -106,47 +85,24 @@ class DynamicsNetwork(nn.Module):
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        return dcn(losses)
+        return dtu.dcn(losses)
 
     def set_scalers(self, states, actions, states_delta):
-        states, actions, states_delta = dcn(states, actions, states_delta)
-        inputs = [states, actions]
-        self.input_scaler = StandardScaler().fit(np.concatenate(inputs, axis=-1))
+        states, actions, states_delta = dtu.dcn(states, actions, states_delta)
+        state_action = np.concatenate([states, actions], axis=1)
+        self.input_scaler = StandardScaler().fit(state_action)
         self.output_scaler = StandardScaler().fit(states_delta)
-    
-    def get_scaled(self, *args):
-        np_type = True
-        arglist = list(args)
-        for i, arg in enumerate(arglist):
-            if arg is not None and not isinstance(arg, np.ndarray):
-                np_type = False
-                arglist[i] = dcn(arg)
 
-        if len(arglist) == 2:
-            # this means args are state, action i.e. inputs
-            states, actions = arglist
-            if len(states.shape) == 1:
-                states = states[None, :]
-            if len(actions.shape) == 1:
-                actions = actions[None, :]
+    def get_scaled_input(self, state, action):
+        model_input = np.concatenate([state, action], axis=1)
+        scaled_input = self.input_scaler.transform(model_input)
+        scaled_state = scaled_input[:, :state.shape[-1]]
+        scaled_action = scaled_input[:, state.shape[-1]:]
+        return scaled_state, scaled_action
 
-            inputs = [states, actions]
-            inputs = np.concatenate(inputs, axis=-1)
-            inputs_scaled = self.input_scaler.transform(inputs)
-            states_scaled = inputs_scaled[:, :states.shape[-1]]
-            actions_scaled = inputs_scaled[:, states.shape[-1]:states.shape[-1]+actions.shape[-1]]
-            if not np_type:
-                states_scaled, actions_scaled = to_tensor(states_scaled, actions_scaled)
-            return states_scaled, actions_scaled
-        elif len(arglist) == 1:
-            # this means args is states_delta i.e. outputs
-            states_delta = arglist[0]
-            states_delta_scaled = self.output_scaler.transform(states_delta)
-            if not np_type:
-                states_delta_scaled = to_tensor(states_delta_scaled)
-            return states_delta_scaled
-        else:
-            raise ValueError
+    def get_scaled_output(self, state_delta):
+        scaled_state_delta = self.output_scaler.transform(state_delta)
+        return scaled_state_delta
 
 
 class MPCAgent:
@@ -166,30 +122,30 @@ class MPCAgent:
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=0.0, norm_weight=0.0, robot_goals=False):
         all_actions = np.random.uniform(*action_range, size=(n_steps, n_samples, action_range.shape[-1]))
-        state, prev_goal, goal, all_actions = to_tensor(state, prev_goal, goal, all_actions)
+        state, prev_goal, goal, all_actions = dtu.as_tensor(state, prev_goal, goal, all_actions)
         self.state = state      # for multi-robot
         states = torch.tile(state, (n_samples, 1))
         all_losses = torch.empty(n_steps, n_samples)
-        
+
         for i in range(n_steps):
             actions = all_actions[i]
             with torch.no_grad():
                 states[:, 2] %= 2 * torch.pi
                 states[:, 5] %= 2 * torch.pi
-                states = to_tensor(self.get_prediction(states, actions, sample=False, scale=True, use_ensemble=False), requires_grad=False)
-   
+                states = dtu.as_tensor(self.get_prediction(states, actions, sample=False, scale=True, use_ensemble=False), requires_grad=False)
+
             dist_loss, heading_loss, perp_loss, norm_loss = self.compute_losses(states, prev_goal, goal,
                                                                                 actions=actions, robot_goals=robot_goals)
 
             # normalize appropriate losses and compute total loss
             all_losses[i] = (dist_weight + perp_weight * perp_loss + heading_weight * heading_loss) * dist_loss
-        
+
         # find index of best trajectory and return corresponding first action
         best_idx = all_losses.sum(dim=0).argmin()
         return all_actions[0, best_idx]
 
     def compute_losses(self, states, prev_goal, goal, actions=None, robot_goals=False, current=False, signed=False):
-        states, prev_goal, goal = to_tensor(states, prev_goal, goal, requires_grad=False)
+        states, prev_goal, goal = dtu.as_tensor(states, prev_goal, goal, requires_grad=False)
         vec_to_goal = (goal - prev_goal)[:2]
 
         if current:
@@ -246,14 +202,14 @@ class MPCAgent:
         norm_loss = -actions[:, :-1].norm(dim=-1).squeeze()
 
         return dist_loss, heading_loss, perp_loss, norm_loss
-    
+
     def get_prediction(self, states_original, actions, scale=True, sample=False, delta=False, use_ensemble=False, model_no=0):
         """
         Accepts state [x, y, theta]
         Returns next_state [x, y, theta]
         """
-        states_converted = self.convert_state(states_original)     # convert state to robot sc, object-to-robot xysc
-        # states_converted = self.convert_state(states_original)[:, :2]     # convert state to robot sc
+        states_converted = dtu.convert_state(states_original)     # convert state to robot sc, object-to-robot xysc
+        # states_converted = dtu.convert_state(states_original)[:, :2]     # convert state to robot sc
 
         if use_ensemble:
             states_delta_sum = np.zeros((len(states_original), 8))
@@ -261,10 +217,10 @@ class MPCAgent:
                 model.eval()
                 cur_states, cur_actions = states_converted, actions
                 if self.scale and scale:
-                    cur_states, cur_actions = model.get_scaled(cur_states, cur_actions)
+                    cur_states, cur_actions = model.get_scaled_input(cur_states, cur_actions)
 
-                cur_states, cur_actions = to_tensor(cur_states, cur_actions)
-                cur_states, cur_actions = to_device(cur_states, cur_actions)
+                cur_states, cur_actions = dtu.as_tensor(cur_states, cur_actions)
+                cur_states, cur_actions = dtu.to_device(cur_states, cur_actions)
 
                 with torch.no_grad():
                     model_output = model(cur_states, cur_actions)
@@ -277,7 +233,7 @@ class MPCAgent:
                 else:
                     states_delta = model_output
 
-                states_delta = dcn(states_delta)
+                states_delta = dtu.dcn(states_delta)
                 if self.scale and scale:
                     states_delta_sum += model.output_scaler.inverse_transform(states_delta)
                 else:
@@ -287,12 +243,12 @@ class MPCAgent:
             model = self.models[model_no]
             model.eval()
             if self.scale and scale:
-                states, actions = model.get_scaled(states_converted, actions)
+                states, actions = model.get_scaled_input(states_converted, actions)
             else:
                 states = states_converted
 
-            states, actions = to_tensor(states, actions)
-            states, actions = to_device(states, actions)
+            states, actions = dtu.as_tensor(states, actions)
+            states, actions = dtu.to_device(states, actions)
 
             with torch.no_grad():
                 model_output = model(states, actions)
@@ -305,7 +261,7 @@ class MPCAgent:
             else:
                 states_delta = model_output
 
-            states_delta = dcn(states_delta)
+            states_delta = dtu.dcn(states_delta)
             if self.scale and scale:
                 states_delta = model.output_scaler.inverse_transform(states_delta)
 
@@ -315,14 +271,14 @@ class MPCAgent:
         robot_state, object_state = states_original[:, :3], states_original[:, 3:]
         robot_delta, object_delta = states_delta[:, :4], states_delta[:, 4:]
 
-        next_robot_state = self.compute_next_state(robot_state, robot_delta)
-        next_object_state = self.compute_next_state(object_state, object_delta)
+        next_robot_state = dtu.compute_next_state(robot_state, robot_delta)
+        next_object_state = dtu.compute_next_state(object_state, object_delta)
         next_state = torch.cat((next_robot_state, next_object_state), dim=-1)
 
         # robot_state, robot_delta = states_original[:, :3], states_delta[:, :4]
-        # next_state = self.compute_next_state(robot_state, robot_delta)
+        # next_state = dtu.compute_next_state(robot_state, robot_delta)
 
-        next_state = dcn(next_state)
+        next_state = dtu.dcn(next_state)
         return next_state
 
     def compute_next_state(self, state, state_delta):
@@ -343,7 +299,7 @@ class MPCAgent:
         return next_state
 
     def convert_state(self, states, xysc=False):
-        states = to_tensor(states)
+        states = dtu.as_tensor(states)
         robot_xy, object_xy = states[:, :2], states[:, 3:5]
         robot_theta, object_theta = states[:, 2], states[:, 5]
 
@@ -357,10 +313,10 @@ class MPCAgent:
         if xysc:
             return full_states, robot_xysc, object_xysc
         return full_states
-        
+
     def convert_state_delta(self, states, next_states):
-        full_states, robot_xysc, object_xysc = self.convert_state(states, xysc=True)
-        next_states = to_tensor(next_states)
+        full_states, robot_xysc, object_xysc = dtu.convert_state(states, xysc=True)
+        next_states = dtu.as_tensor(next_states)
 
         robot_next_theta, object_next_theta = next_states[:, 2], next_states[:, 5]
         robot_next_xy, object_next_xy = next_states[:, :2], next_states[:, 3:5]
@@ -377,15 +333,15 @@ class MPCAgent:
         return full_states, states_delta
 
     def train(self, states, actions, next_states, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
-        states, actions, next_states = to_tensor(states, actions, next_states)
+        states, actions, next_states = dtu.as_tensor(states, actions, next_states)
 
         n_test = 100
         idx = np.arange(len(states))
         train_states, test_states, train_actions, test_actions, train_next_states, test_next_states, \
                 train_idx, test_idx = train_test_split(states, actions, next_states, idx, test_size=n_test, random_state=self.seed)
-        
-        test_states, test_actions, test_next_states = to_device(*to_tensor(test_states, test_actions, test_next_states))
-        _, test_states_delta = self.convert_state_delta(test_states, test_next_states)
+
+        test_states, test_actions, test_next_states = dtu.to_device(*dtu.as_tensor(test_states, test_actions, test_next_states))
+        _, test_states_delta = dtu.convert_state_delta(test_states, test_next_states)
 
         for k, model in enumerate(self.models):
             if use_all_data:
@@ -397,16 +353,16 @@ class MPCAgent:
                 train_actions = actions[train_idx]
                 train_next_states = next_states[train_idx]
 
-            train_states, train_states_delta = self.convert_state_delta(train_states, train_next_states)
+            train_states, train_states_delta = dtu.convert_state_delta(train_states, train_next_states)
 
             if set_scalers:
                 model.set_scalers(train_states, train_actions, train_states_delta)
 
             if self.scale:
-                train_states, train_actions = model.get_scaled(train_states, train_actions)
-                train_states_delta = model.get_scaled(train_states_delta)
+                train_states, train_actions = model.get_scaled_input(train_states, train_actions)
+                train_states_delta = model.get_scaled_output(train_states_delta)
 
-            train_states, train_actions, train_states_delta = to_tensor(train_states, train_actions, train_states_delta)
+            train_states, train_actions, train_states_delta = dtu.as_tensor(train_states, train_actions, train_states_delta)
 
             training_losses = []
             test_losses = []
@@ -415,9 +371,9 @@ class MPCAgent:
 
             model.eval()
             with torch.no_grad():
-                pred_states_delta = to_device(to_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True, scale=True, model_no=k)))
+                pred_states_delta = dtu.to_device(dtu.as_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True, scale=True, model_no=k)))
             test_loss = self.mse_loss(pred_states_delta, test_states_delta)
-            test_loss_mean = dcn(test_loss.mean())
+            test_loss_mean = dtu.dcn(test_loss.mean())
             test_losses.append(test_loss_mean)
             tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
             model.train()
@@ -431,24 +387,24 @@ class MPCAgent:
                     batch_states = torch.autograd.Variable(train_states[start:end])
                     batch_actions = torch.autograd.Variable(train_actions[start:end])
                     batch_states_delta = torch.autograd.Variable(train_states_delta[start:end])
-                    batch_states, batch_actions, batch_states_delta = to_device(batch_states, batch_actions, batch_states_delta)
-                    
+                    batch_states, batch_actions, batch_states_delta = dtu.to_device(batch_states, batch_actions, batch_states_delta)
+
                     training_loss = model.update(batch_states, batch_actions, batch_states_delta)
                     if type(training_loss) != float:
                         while len(training_loss.shape) > 1:
                             training_loss = training_loss.mean(axis=-1)
-            
+
                 training_loss_mean = training_loss.mean()
                 training_losses.append(training_loss_mean)
                 model.eval()
                 with torch.no_grad():
-                    pred_states_delta = to_device(to_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True, scale=True, model_no=k)))
+                    pred_states_delta = dtu.to_device(dtu.as_tensor(self.get_prediction(test_states, test_actions, sample=False, delta=True, scale=True, model_no=k)))
                 test_loss = self.mse_loss(pred_states_delta, test_states_delta)
-                test_loss_mean = dcn(test_loss.mean())
+                test_loss_mean = dtu.dcn(test_loss.mean())
                 test_losses.append(test_loss_mean)
                 tqdm.write(f"{i+1}: mean training loss: {training_loss_mean} | mean test loss: {test_loss_mean}")
                 model.train()
-            
+
             model.eval()
         return training_losses, test_losses, test_idx
 
@@ -572,7 +528,7 @@ if __name__ == '__main__':
     if args.new_agent:
         input_dim = actions.shape[-1] + 6
         output_dim = 8
-        
+
         agent = MPCAgent(input_dim, output_dim, seed=args.seed, dist=args.dist,
                          scale=args.scale, hidden_dim=args.hidden_dim,
                          hidden_depth=args.hidden_depth, lr=args.learning_rate,
@@ -598,7 +554,7 @@ if __name__ == '__main__':
                 plt.legend()
                 plt.grid()
                 plt.show()
-        
+
         if args.save:
             agent_path = args.save_agent_path if args.save_agent_path else agent_path
             print(f"\nSAVING MPC AGENT: {agent_path}\n")
@@ -612,7 +568,7 @@ if __name__ == '__main__':
         # agent.model.eval()
         # diffs = []
         # pred_next_states = agent.get_prediction(test_states, test_actions)
-        
+
         # error = abs(pred_next_states - test_states_delta)
         # print("\nERROR MEAN:", error.mean(axis=0))
         # print("ERROR STD:", error.std(axis=0))
@@ -623,7 +579,7 @@ if __name__ == '__main__':
         # print("\nACTUAL MEAN:", diffs.mean(axis=0))
         # print("ACTUAL STD:", diffs.std(axis=0))
         # set_trace()
-        
+
         if args.retrain:
             training_losses, test_losses, test_idx = agent.train(states, actions, next_states,
                                                    epochs=args.epochs, batch_size=args.batch_size)
@@ -655,7 +611,7 @@ if __name__ == '__main__':
     _, states_delta = agent.convert_state_delta(states, next_states)
 
     test_states, test_actions = states[test_idx], actions[test_idx]
-    test_states_delta = dcn(states_delta[test_idx])
+    test_states_delta = dtu.dcn(states_delta[test_idx])
     pred_states_delta = agent.get_prediction(test_states, test_actions, sample=False, scale=args.scale, delta=True, use_ensemble=False)
 
     error = abs(pred_states_delta - test_states_delta)
@@ -684,7 +640,7 @@ if __name__ == '__main__':
 
         slist = np.array(slist)
         alist = np.array(alist)
-        
+
         plt.quiver(slist[:, 0], slist[:, 1], -slist[:, 2], -slist[:, 3], color="green")
         plt.quiver(states[start:end, 0], states[start:end, 1], -states[start:end, 2], -states[start:end, 3], color="purple")
         plt.plot(slist[:, 0], slist[:, 1], color="green", linewidth=1.0, label="Predicted Trajectory")
