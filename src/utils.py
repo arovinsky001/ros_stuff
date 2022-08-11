@@ -202,13 +202,3 @@ class KamigamiInterface:
         self.states = []
         self.actions = []
         self.next_states = []
-
-    def get_new_pwm(self, pwm, before, after):
-        positive = (pwm > 0)
-        abs_pwm = abs(pwm)
-        if abs_pwm < before:
-            new_abs_pwm = abs_pwm * after / before
-        else:
-            new_abs_pwm = (abs_pwm - before) / before * (1 - after) + after
-        new_pwm = new_abs_pwm * (positive * 2 - 1)
-        return np.clip(new_pwm, *self.action_range[:, 0])
