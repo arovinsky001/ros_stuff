@@ -8,6 +8,7 @@ import rospy
 
 from real_mpc_dynamics import *
 from utils import KamigamiInterface
+import data_utils as dtu
 from ros_stuff.msg import RobotCmd
 
 from tf.transformations import euler_from_quaternion
@@ -21,6 +22,7 @@ class RealMPC(KamigamiInterface):
         self.initialized = False
         self.epsilon = 0.0
         self.steps = 0
+        self.gradient_steps = 1
         self.random_steps = 0 if pretrain else 300
 
         super().__init__(robot_id, object_id, SAVE_PATH, calibrate, new_buffer=new_buffer)
@@ -102,7 +104,7 @@ class RealMPC(KamigamiInterface):
 
         back_circle_center_rel = np.array([0.38, 0.65])
         front_circle_center_rel = np.array([0.74, 0.3])
-        
+
         self.back_circle_center = back_circle_center_rel * corner_range + self.front_left_corner
         self.front_circle_center = front_circle_center_rel * corner_range + + self.front_left_corner
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
@@ -120,7 +122,7 @@ class RealMPC(KamigamiInterface):
             last_goal = self.last_goal if self.started else state_for_last_goal
             dist_loss, heading_loss, perp_loss = self.agent.compute_losses(self.get_state(wait=False), last_goal, self.get_goal(), current=True, robot_goals=self.robot_goals)
             total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
-            
+
             if self.started:
                 self.stamped_losses[1:] = self.stamped_losses[:-1]
                 self.stamped_losses[0] = [rospy.get_time()] + [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss, total_loss]]
@@ -262,7 +264,7 @@ class RealMPC(KamigamiInterface):
 
         theta += np.pi / 4
         goal = center + np.array([np.sin(theta), np.cos(theta)]) * self.radius
-        
+
         return np.block([goal, 0.0])
 
     def check_rollout_finished(self):
@@ -318,12 +320,12 @@ class RealMPC(KamigamiInterface):
             print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.idx} TRANSITIONS\n")
             with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "wb") as f:
                 pkl.dump(self.replay_buffer, f)
-    
+
     def update_model_online(self):
         if self.replay_buffer.full or self.replay_buffer.idx > 50:
             # sample from buffer
             states, actions, next_states = self.replay_buffer.sample(200)
-            states, states_delta = self.agent.convert_state_delta(states, next_states)
+            states, states_delta = dtu.convert_state_delta(states, next_states)
             # states = states[:, :2]
             # states_delta = states_delta[:, :4]
 
@@ -331,9 +333,10 @@ class RealMPC(KamigamiInterface):
                 states, actions = self.agent.models[0].get_scaled(states, actions)
                 states_delta = self.agent.models[0].get_scaled(states_delta)
 
-            # take single gradient step
-            for model in self.agent.models:
-                model.update(states, actions, states_delta)
+            # take gradient steps
+            for _ in range(self.gradient_steps):
+                for model in self.agent.models:
+                    model.update(states, actions, states_delta)
 
 
 if __name__ == '__main__':
