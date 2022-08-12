@@ -62,12 +62,8 @@ class RealMPC(KamigamiInterface):
         self.laps = 0
         self.n_prints = 0
 
-        input_dim = 8
-        output_dim = 8
-        # input_dim = 4
-        # output_dim = 4
-        self.agent = MPCAgent(input_dim, output_dim, seed=0, dist=False, scale=self.scale, hidden_dim=500,
-                              hidden_depth=4, lr=0.001, dropout=0.3, entropy_weight=0.0, ensemble=1)
+        self.agent = MPCAgent(seed=0, dist=False, scale=self.scale, hidden_dim=500, hidden_depth=4,
+                              lr=0.001, dropout=0.3, entropy_weight=0.0, ensemble=1, use_object=True)
 
         if pretrain:
             idx = self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx

@@ -106,8 +106,10 @@ class DynamicsNetwork(nn.Module):
 
 
 class MPCAgent:
-    def __init__(self, input_dim, output_dim, seed=1, hidden_dim=512, hidden_depth=2, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True, ensemble=0):
+    def __init__(self, seed=1, hidden_dim=512, hidden_depth=2, lr=7e-4, dropout=0.5, entropy_weight=0.02, dist=True, scale=True, ensemble=0, use_object=True):
         assert ensemble > 0
+        input_dim = output_dim = 8 if use_object else 4
+
         self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, entropy_weight=entropy_weight, dist=dist)
                                 for _ in range(ensemble)]
         for model in self.models:
@@ -118,6 +120,7 @@ class MPCAgent:
         self.state = None
         self.scale = scale
         self.ensemble = ensemble
+        self.use_object = use_object
 
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=0.0, norm_weight=0.0, robot_goals=False):
@@ -208,8 +211,8 @@ class MPCAgent:
         Accepts state [x, y, theta]
         Returns next_state [x, y, theta]
         """
-        state_converted = dtu.convert_state(state_original)     # convert state to robot sc, object-to-robot xysc
-        # state_converted = dtu.convert_state(state_original)[:, :2]     # convert state to robot sc
+        # convert state to robot sc, object-to-robot xysc
+        state_converted = dtu.convert_state(state_original, use_object=self.use_object)
 
         if use_ensemble:
             state_delta_sum = np.zeros((len(state_original), 8))
@@ -268,15 +271,16 @@ class MPCAgent:
         if delta:
             return state_delta
 
-        robot_state, object_state = state_original[:, :3], state_original[:, 3:]
-        robot_delta, object_delta = state_delta[:, :4], state_delta[:, 4:]
+        if self.use_object:
+            robot_state, object_state = state_original[:, :3], state_original[:, 3:]
+            robot_delta, object_delta = state_delta[:, :4], state_delta[:, 4:]
 
-        next_robot_state = dtu.compute_next_state(robot_state, robot_delta)
-        next_object_state = dtu.compute_next_state(object_state, object_delta)
-        next_state = torch.cat((next_robot_state, next_object_state), dim=-1)
-
-        # robot_state, robot_delta = state_original[:, :3], state_delta[:, :4]
-        # next_state = dtu.compute_next_state(robot_state, robot_delta)
+            next_robot_state = dtu.compute_next_state(robot_state, robot_delta)
+            next_object_state = dtu.compute_next_state(object_state, object_delta)
+            next_state = torch.cat((next_robot_state, next_object_state), dim=-1)
+        else:
+            robot_state, robot_delta = state_original[:, :3], state_delta[:, :4]
+            next_state = dtu.compute_next_state(robot_state, robot_delta)
 
         next_state = dtu.dcn(next_state)
         return next_state
@@ -290,7 +294,7 @@ class MPCAgent:
                 train_idx, test_idx = train_test_split(state, action, next_state, idx, test_size=n_test, random_state=self.seed)
 
         test_state, test_action, test_next_state = dtu.to_device(*dtu.as_tensor(test_state, test_action, test_next_state))
-        _, test_state_delta = dtu.convert_state_delta(test_state, test_next_state)
+        _, test_state_delta = dtu.convert_state_delta(test_state, test_next_state, use_object=self.use_object)
 
         for k, model in enumerate(self.models):
             if use_all_data:
@@ -302,7 +306,7 @@ class MPCAgent:
                 train_action = action[train_idx]
                 train_next_state = next_state[train_idx]
 
-            train_state, train_state_delta = dtu.convert_state_delta(train_state, train_next_state)
+            train_state, train_state_delta = dtu.convert_state_delta(train_state, train_next_state, use_object=self.use_object)
 
             if set_scalers:
                 model.set_scalers(train_state, train_action, train_state_delta)
@@ -393,6 +397,7 @@ if __name__ == '__main__':
     parser.add_argument('-ensemble', type=int, default=1,
                         help='how many networks to use for an ensemble')
     parser.add_argument('-use_all_data', action='store_true')
+    parser.add_argument('-use_object', action='store_true')
 
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -406,21 +411,22 @@ if __name__ == '__main__':
     else:
         device = torch.device("cpu")
 
-    with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
-        buffer = pkl.load(f)
+    if args.use_object:
+        with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
+            buffer = pkl.load(f)
 
-    states = buffer.states[:buffer.idx-1]
-    action = buffer.action[:buffer.idx-1]
-    next_states = buffer.states[1:buffer.idx]
+        states = buffer.states[:buffer.idx-1]
+        action = buffer.action[:buffer.idx-1]
+        next_states = buffer.states[1:buffer.idx]
+    else:
+        data = np.load("/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/real_data.npz")
+        states = data["states"]
+        actions = data["actions"]
+        next_states = data["next_states"]
 
-    # data = np.load("/Users/Obsidian/Desktop/eecs106b/projects/MPCDynamicsKamigami/sim/data/real_data.npz")
-    # states = data["states"]
-    # actions = data["actions"]
-    # next_states = data["next_states"]
-
-    # states = states[:, 0, :-1]
-    # actions = actions[:, 0, :-1]
-    # next_states = next_states[:, 0, :-1]
+        states = states[:, 0, :-1]
+        actions = actions[:, 0, :-1]
+        next_states = next_states[:, 0, :-1]
 
     if args.retrain:
         online_data = np.load("../../sim/data/real_data_online400.npz")
@@ -484,14 +490,11 @@ if __name__ == '__main__':
         plt.show()
 
     if args.new_agent:
-        # input_dim, output_dim = 4, 4
-        input_dim = actions.shape[-1] + 6
-        output_dim = 8
-
-        agent = MPCAgent(input_dim, output_dim, seed=args.seed, dist=args.dist,
+        agent = MPCAgent(seed=args.seed, dist=args.dist,
                          scale=args.scale, hidden_dim=args.hidden_dim,
                          hidden_depth=args.hidden_depth, lr=args.learning_rate,
-                         dropout=args.dropout, entropy_weight=args.entropy, ensemble=args.ensemble)
+                         dropout=args.dropout, entropy_weight=args.entropy, ensemble=args.ensemble,
+                         use_object=args.use_object)
 
         # batch_sizes = [args.batch_size, args.batch_size * 10, args.batch_size * 100, args.batch_size * 1000]
         batch_sizes = [args.batch_size]
@@ -567,7 +570,7 @@ if __name__ == '__main__':
     for model in agent.models:
         model.eval()
 
-    _, state_delta = dtu.convert_state_delta(states, next_states)
+    _, state_delta = dtu.convert_state_delta(states, next_states, use_object=args.use_object)
 
     test_states, test_actions = states[test_idx], actions[test_idx]
     test_state_delta = dtu.dcn(state_delta[test_idx])
