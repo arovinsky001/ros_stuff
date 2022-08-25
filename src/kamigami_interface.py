@@ -32,7 +32,7 @@ class KamigamiInterface:
         self.last_n_updates = 0
         self.not_found = False
         self.started = False
-        
+
         self.n_avg_states = 1
         self.n_wait_updates = 1
         self.n_clip = 3
@@ -82,7 +82,7 @@ class KamigamiInterface:
             tag_offsets = np.load(self.tag_offset_path)
         else:
             tag_offsets = np.zeros(10)
-        
+
         input(f"Place robot/object on the left calibration point, aligned with the calibration line and hit enter.")
         left_state = self.get_state(wait=False)
         input(f"Place robot/object on the right calibration point, aligned with the calibration line and hit enter.")
@@ -102,7 +102,7 @@ class KamigamiInterface:
 
         tag_offsets[self.robot_id] = true_robot_angle - measured_robot_angle
         tag_offsets[self.object_id] = true_object_angle - measured_object_angle
-        
+
         np.save(self.tag_offset_path, tag_offsets)
 
     def update_state(self, msg):
@@ -148,7 +148,7 @@ class KamigamiInterface:
                         robot_states.append(self.robot_state.copy())
                         object_states.append(self.object_state.copy())
                         self.last_n_updates = self.n_updates
-            
+
             robot_state = np.array(robot_states).squeeze().mean(axis=0)
             object_state = np.array(object_states).squeeze().mean(axis=0)
         else:
@@ -156,10 +156,10 @@ class KamigamiInterface:
                 while self.n_updates == self.last_n_updates:
                     rospy.sleep(0.0001)
                 self.last_n_updates = self.n_updates
-            
+
             robot_state = self.robot_state.copy()
             object_state = self.object_state.copy()
-        
+
         current_state = np.concatenate((robot_state, object_state), axis=0)
         return current_state
 
@@ -167,7 +167,7 @@ class KamigamiInterface:
         states = np.array(self.states)
         actions = np.array(self.actions)
         next_states = np.array(self.next_states)
-        
+
         length = min(len(states), len(actions), len(next_states))
         states = states[:length]
         actions = actions[:length]
@@ -186,7 +186,7 @@ class KamigamiInterface:
                 states = np.append(old_states, states, axis=0)
                 actions = np.append(old_actions, actions, axis=0)
                 next_states = np.append(old_next_states, next_states, axis=0)
-            
+
             # ignore last few transitions in case of uncertain ending
             if clip_end:
                 states = states[:-self.n_clip]
@@ -195,7 +195,7 @@ class KamigamiInterface:
                 if len(states) + len(actions) + len(next_states) == 0:
                     print("skipping this save!")
                     return
-                    
+
             np.savez_compressed(self.save_path, states=states, actions=actions, next_states=next_states)
 
         print(f"Collected {len(states)} transitions in total!")

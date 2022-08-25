@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 import rospy
 
 from real_mpc_dynamics import *
-from utils import KamigamiInterface
-import data_utils as dtu
+from kamigami_interface import KamigamiInterface
 from ros_stuff.msg import RobotCmd
 
 from tf.transformations import euler_from_quaternion
@@ -139,6 +138,7 @@ class RealMPC(KamigamiInterface):
                 if self.plot:
                     plot_goals = np.array(self.plot_goals)
                     plot_states = np.array(self.plot_states)
+                    plt.close()
                     plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
                     plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
                     if self.first_plot:
@@ -281,6 +281,7 @@ class RealMPC(KamigamiInterface):
             self.started = False
             plot_goals = np.array(self.plot_goals)
             plot_states = np.array(self.plot_states)
+            plt.close()
             plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
             plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
             if self.first_plot:
@@ -289,7 +290,7 @@ class RealMPC(KamigamiInterface):
                 plt.show()
                 self.first_plot = False
             plt.draw()
-            plt.pause(0.001)
+            plt.pause(0.0001)
 
         if self.laps == self.n_rollouts:
             self.dump_performance_metrics()
@@ -319,20 +320,10 @@ class RealMPC(KamigamiInterface):
 
     def update_model_online(self):
         if self.replay_buffer.full or self.replay_buffer.idx > 50:
-            # sample from buffer
-            states, actions, next_states = self.replay_buffer.sample(200)
-            states, states_delta = dtu.convert_state_delta(states, next_states)
-            # states = states[:, :2]
-            # states_delta = states_delta[:, :4]
-
-            if self.scale:
-                states, actions = self.agent.models[0].get_scaled(states, actions)
-                states_delta = self.agent.models[0].get_scaled(states_delta)
-
-            # take gradient steps
-            for _ in range(self.gradient_steps):
-                for model in self.agent.models:
-                    model.update(states, actions, states_delta)
+            for model in self.agent.models:
+                for _ in range(self.gradient_steps):
+                    states, actions, next_states = self.replay_buffer.sample(200)
+                    model.update(states, actions, next_states)
 
 
 if __name__ == '__main__':
