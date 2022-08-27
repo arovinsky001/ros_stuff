@@ -21,8 +21,8 @@ class RealMPC(KamigamiInterface):
         self.initialized = False
         self.epsilon = 0.0
         self.steps = 0
-        self.gradient_steps = 1
-        self.random_steps = 0 if pretrain else 300
+        self.gradient_steps = 5
+        self.random_steps = 0 if pretrain else 500
 
         super().__init__(robot_id, object_id, SAVE_PATH, calibrate, new_buffer=new_buffer)
         self.define_goal_trajectory()
@@ -42,14 +42,21 @@ class RealMPC(KamigamiInterface):
         self.dist_weight = 3.0
         self.norm_weight = 0.0
         self.dist_bonus_factor = 10.
+        self.sep_weight = 0.0
+        self.discrim_weight = 0.
+        self.heading_diff_weight = 0.0
 
         # self.perp_weight = 0.
         # self.heading_weight = 0.
-        # self.dist_weight = 1.0
+        # self.dist_weight = 1.
         # self.norm_weight = 0.0
         # self.dist_bonus_factor = 0.
+        # self.sep_weight = 0.
+        # self.discrim_weight = 0.
+        # self.heading_diff_weight = 0.0
 
-        self.plot_states = []
+        self.plot_robot_states = []
+        self.plot_object_states = []
         self.plot_goals = []
 
         loss_buffer_size = 1000
@@ -61,29 +68,50 @@ class RealMPC(KamigamiInterface):
         self.laps = 0
         self.n_prints = 0
 
-        self.agent = MPCAgent(seed=0, dist=False, scale=self.scale, hidden_dim=500, hidden_depth=4,
-                              lr=0.001, dropout=0.3, entropy_weight=0.0, ensemble=1, use_object=True)
+        self.agent = MPCAgent(seed=0, dist=True, scale=self.scale, hidden_dim=200, hidden_depth=2,
+                              lr=0.001, dropout=0.2, ensemble=1, use_object=True)
 
         if pretrain:
             idx = self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx
             states = self.replay_buffer.states[:idx-1]
             actions = self.replay_buffer.actions[:idx-1]
             next_states = self.replay_buffer.states[1:idx]
-            training_losses, test_losses, _ = self.agent.train(
-                    states, actions, next_states, set_scalers=True, epochs=200, batch_size=1000, use_all_data=False)
+
+            training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
+                    states, actions, next_states, set_scalers=True, epochs=400, discrim_epochs=5, batch_size=1000, use_all_data=False)
 
             training_losses = np.array(training_losses).squeeze()
             test_losses = np.array(test_losses).squeeze()
+            discrim_training_losses = np.array(discrim_training_losses).squeeze()
+            discrim_test_losses = np.array(discrim_training_losses).squeeze()
+
             print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
             print("MIN TEST LOSS:", test_losses.min())
-            plt.plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
-            plt.plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
-            plt.yscale('log')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title('Dynamics Model Loss')
-            plt.legend()
-            plt.grid()
+
+            print("\nMIN DISCRIM TEST LOSS EPOCH:", discrim_test_losses.argmin())
+            print("MIN DISCRIM TEST LOSS:", discrim_test_losses.min())
+
+            fig, axes = plt.subplots(1, 4)
+            axes[0].plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
+            axes[1].plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+            axes[2].plot(np.arange(len(discrim_training_losses)), discrim_training_losses, label="Discriminator Training Loss")
+            axes[3].plot(np.arange(len(discrim_test_losses)), discrim_test_losses, label="Discriminator Test Loss")
+
+            axes[0].set_yscale('log')
+            axes[1].set_yscale('log')
+
+            axes[0].set_title('Training Loss')
+            axes[1].set_title('Test Loss')
+            axes[2].set_title('Discriminator Training Loss')
+            axes[3].set_title('Discriminator Test Loss')
+
+            for ax in axes:
+                ax.grid()
+
+            axes[0].set_ylabel('Loss')
+            axes[1].set_xlabel('Epoch')
+            fig.set_size_inches(15, 5)
+
             plt.show()
 
         for g in self.agent.models[0].optimizer.param_groups:
@@ -93,15 +121,19 @@ class RealMPC(KamigamiInterface):
         self.initialized = True
 
     def define_goal_trajectory(self):
-        self.front_left_corner = np.array([-0.1, -1.15])
-        self.back_right_corner = np.array([-1.9, 0.1])
+        # self.front_left_corner = np.array([-0.1, -1.15])
+        # self.back_right_corner = np.array([-1.9, 0.1])
+        self.front_left_corner = np.array([-0.03, -1.4])
+        self.back_right_corner = np.array([-2.5, 0.05])
         corner_range = self.back_right_corner - self.front_left_corner
-
-        back_circle_center_rel = np.array([0.38, 0.65])
-        front_circle_center_rel = np.array([0.74, 0.3])
+        
+        # max distance between robot and object(gives adequate buffer space near perimeter)
+        max_sep_rel = abs(0.3/corner_range[0])
+        back_circle_center_rel = np.array([(0.75*max_sep_rel) + 0.25, 0.5])
+        front_circle_center_rel = np.array([0.75 - (0.75*max_sep_rel), 0.5])
 
         self.back_circle_center = back_circle_center_rel * corner_range + self.front_left_corner
-        self.front_circle_center = front_circle_center_rel * corner_range + + self.front_left_corner
+        self.front_circle_center = front_circle_center_rel * corner_range + self.front_left_corner
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
     def update_state(self, msg):
@@ -129,18 +161,22 @@ class RealMPC(KamigamiInterface):
             rospy.sleep(0.2)
 
         self.first_plot = True
-        self.init_goal = self.get_goal()
+        self.init_goal = self.get_goal(random=False)
         while not rospy.is_shutdown():
             if self.started:
-                state_to_plot = self.robot_state.copy() if self.robot_goals else self.object_state.copy()
-                self.plot_states.append(state_to_plot)
+                # plot robot and object
+                robot_state_to_plot = self.robot_state.copy()
+                object_state_to_plot = self.object_state.copy()
+                self.plot_robot_states.append(robot_state_to_plot)
+                self.plot_object_states.append(object_state_to_plot)  
                 self.plot_goals.append(self.last_goal.copy())
                 if self.plot:
                     plot_goals = np.array(self.plot_goals)
-                    plot_states = np.array(self.plot_states)
-                    plt.close()
+                    plot_robot_states = np.array(self.plot_robot_states)
+                    plot_object_states = np.array(self.plot_object_states)
                     plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-                    plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+                    plt.plot(plot_robot_states[:, 0] * -1, plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
+                    plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
                     if self.first_plot:
                         plt.legend()
                         plt.ion()
@@ -195,7 +231,9 @@ class RealMPC(KamigamiInterface):
             action = self.agent.mpc_action(state, last_goal, goal, self.action_range, n_steps=self.mpc_steps,
                                            n_samples=self.mpc_samples, perp_weight=self.perp_weight,
                                            heading_weight=self.heading_weight, dist_weight=self.dist_weight,
-                                           norm_weight=self.norm_weight, robot_goals=self.robot_goals).detach().numpy()
+                                           norm_weight=self.norm_weight, sep_weight=self.sep_weight if self.started else 0.,
+                                           discrim_weight=self.discrim_weight, heading_diff_weight=self.heading_diff_weight,
+                                           robot_goals=self.robot_goals).detach().numpy()
         else:
             print("TAKING RANDOM ACTION")
             action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
@@ -245,22 +283,29 @@ class RealMPC(KamigamiInterface):
 
         return action
 
-    def get_goal(self):
+    def get_goal(self, random=True):
         t_rel = (self.time_elapsed % self.lap_time) / self.lap_time
+        if not self.started and random:
+            t_rel += np.random.uniform(0, 0.01)
 
-        if t_rel < 0.25:
-            theta = 2 * np.pi * t_rel / 0.5
-            center = self.back_circle_center
-        elif 0.25 <= t_rel < 0.75:
-            theta = -2 * np.pi * (t_rel - 0.25) / 0.5
+        if t_rel < 0.5:
+            theta = t_rel * 2 * 2 * np.pi
             center = self.front_circle_center
         else:
-            theta = 2 * np.pi * (t_rel - 0.5) / 0.5
+            theta = np.pi - ((t_rel - 0.5) * 2 * 2 * np.pi)
             center = self.back_circle_center
+        # if t_rel < 0.25:
+        #     theta = 2 * np.pi * t_rel / 0.5
+        #     center = self.back_circle_center
+        # elif 0.25 <= t_rel < 0.75:
+        #     theta = -2 * np.pi * (t_rel - 0.25) / 0.5
+        #     center = self.front_circle_center
+        # else:
+        #     theta = 2 * np.pi * (t_rel - 0.5) / 0.5
+        #     center = self.back_circle_center
 
-        theta += np.pi / 4
-        goal = center + np.array([np.sin(theta), np.cos(theta)]) * self.radius
-
+        # theta -= np.pi / 4
+        goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
         return np.block([goal, 0.0])
 
     def check_rollout_finished(self):
@@ -280,17 +325,20 @@ class RealMPC(KamigamiInterface):
 
             self.started = False
             plot_goals = np.array(self.plot_goals)
-            plot_states = np.array(self.plot_states)
-            plt.close()
+            plot_robot_states = np.array(self.plot_robot_states)
+            plot_object_states = np.array(self.plot_object_states)
             plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-            plt.plot(plot_states[:, 0] * -1, plot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Actual Trajectory")
+            plt.plot(plot_robot_states[:, 0] * -1, plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
+            plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
             if self.first_plot:
                 plt.legend()
                 plt.ion()
                 plt.show()
                 self.first_plot = False
             plt.draw()
-            plt.pause(0.0001)
+            plt.savefig("/home/bvanbuskirk/Desktop/lap_plots/Transitions:{}_robot:{}".format(self.replay_buffer.idx, self.robot_goals))
+            plt.pause(1.0)
+            plt.close()
 
         if self.laps == self.n_rollouts:
             self.dump_performance_metrics()
@@ -314,7 +362,7 @@ class RealMPC(KamigamiInterface):
         self.replay_buffer.add(state, action)
 
         if self.replay_buffer.idx % self.save_freq == 0:
-            print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.idx} TRANSITIONS\n")
+            print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx} TRANSITIONS\n")
             with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "wb") as f:
                 pkl.dump(self.replay_buffer, f)
 

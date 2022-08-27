@@ -24,7 +24,7 @@ class KamigamiInterface:
 
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.3
+        self.duration = 0.5
         self.robot_state = np.zeros(3)      # (x, y, theta)
         self.object_state = np.zeros(3)     # (x, y, theta)
 

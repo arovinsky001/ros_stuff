@@ -39,25 +39,46 @@ def kami_callback(request):
         motor_right_forward.off()
         motor_right_backward.on()
     motor_right_pwm.on()
-
-    motor_left_pwm.value = 0.0
-    motor_right_pwm.value = 0.0
     
     # Getting requested pwm values
-    left_val, right_val, name = request.robot_cmd.left_pwm, request.robot_cmd.right_pwm, request.name
-    
-    # pub = rospy.Publisher('/{}/cmd_topic'.format(name), String, queue_size=10)
+    c, name = request.robot_cmd, request.name
+    left_val, right_val, duration = c.left_pwm, c.right_pwm, c.duration
 
-    motor_right_pwm.value = abs(right_val)
-    motor_left_pwm.value = abs(left_val)
+    ramp_duration = duration * 0.1
+    duration -= ramp_duration * 2
+    t = rospy.get_rostime().to_sec()
+    ramp_steps = 10
+    left_pwm, right_pwm = 0., 0.
+    r = rospy.Rate(ramp_steps / ramp_duration)
+
+    while rospy.get_rostime().to_sec() < t + ramp_duration:
+        motor_left_pwm.value = abs(left_pwm)
+        motor_right_pwm.value = abs(right_pwm)
+        left_pwm += left_val / ramp_steps
+        right_pwm += right_val / ramp_steps
+        r.sleep()
+    
+    left_pwm, right_pwm = left_val, right_val
+    motor_left_pwm.value = abs(left_pwm)
+    motor_right_pwm.value = abs(right_pwm)
+
     action_time = rospy.get_rostime().to_sec()
-    print(f"{rospy.get_name()}  ||  left_pwm: {left_val}  ||  right_pwm: {right_val}")
+    print(f"{rospy.get_name()}  ||  L: {left_val}  ||  R: {right_val} || T: {duration}")
     
+    rospy.sleep(duration)
 
-    rospy.sleep(0.1)
+    t = rospy.get_rostime().to_sec()
+    r = rospy.Rate(ramp_steps / ramp_duration)
+
+    while rospy.get_rostime().to_sec() < t + ramp_duration:
+        left_pwm -= left_val / ramp_steps
+        right_pwm -= right_val / ramp_steps
+        motor_left_pwm.value = abs(left_pwm)
+        motor_right_pwm.value = abs(right_pwm)
+        r.sleep()
+
     motor_left_pwm.value = 0.0
     motor_right_pwm.value = 0.0
-    rospy.sleep(0.05)
 
     return CommandActionResponse(name, action_time)
 

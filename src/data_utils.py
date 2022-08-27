@@ -35,12 +35,15 @@ class DataUtils:
     def __init__(self, use_object=True):
         self.use_object = use_object
 
-    def state_to_xysc(self, state):
+    def state_to_xysc(self, state, single_state=False):
         """
         Inputs:
-            state = [x, y, theta]
+            state = [x, y, theta, x, y, theta]
         Output:
-            state = [x, y, sin(theta), cos(theta)]
+            if single_state:
+                state = [x, y, sin(theta), cos(theta)]
+            else:
+                state = [x, y, sin(theta), cos(theta), x, y, sin(theta), cos(theta)]
         """
         state = as_tensor(state)
 
@@ -48,7 +51,7 @@ class DataUtils:
         robot_sc = torch.stack((torch.sin(robot_theta), torch.cos(robot_theta)), dim=1)
         robot_xysc = torch.cat((robot_xy, robot_sc), dim=-1)
 
-        if self.use_object:
+        if self.use_object and not single_state:
             object_xy, object_theta = state[:, 3:5], state[:, 5]
             object_sc = torch.stack((torch.sin(object_theta), torch.cos(object_theta)), dim=1)
             object_xysc = torch.cat((object_xy, object_sc), dim=-1)
@@ -72,7 +75,7 @@ class DataUtils:
         robot_theta = torch.atan2(robot_sc[:, 1], robot_sc[:, 0])
 
         if self.use_object:
-            object_xy, object_sc = state[4:6], state[6:]
+            object_xy, object_sc = state[:, 4:6], state[:, 6:]
             object_theta = torch.atan2(object_sc[:, 1], object_sc[:, 0])
             full_state = torch.cat((robot_xy, robot_theta[:, None], object_xy, object_theta[:, None]), dim=1)
         else:
@@ -128,12 +131,12 @@ class DataUtils:
         state, next_state = as_tensor(state, next_state)
 
         robot_state, robot_next_state = state[:, :3], next_state[:, :3]
-        robot_xysc, robot_next_xysc = self.state_to_xysc(robot_state), self.state_to_xysc(robot_next_state)
+        robot_xysc, robot_next_xysc = self.state_to_xysc(robot_state, single_state=True), self.state_to_xysc(robot_next_state, single_state=True)
         robot_state_delta_xysc = robot_next_xysc - robot_xysc
 
         if self.use_object:
-            object_state, object_next_state = state[3:], next_state[3:]
-            object_xysc, object_next_xysc = self.state_to_xysc(object_state), self.state_to_xysc(object_next_state)
+            object_state, object_next_state = state[:, 3:], next_state[:, 3:]
+            object_xysc, object_next_xysc = self.state_to_xysc(object_state, single_state=True), self.state_to_xysc(object_next_state, single_state=True)
             object_state_delta_xysc = object_next_xysc - object_xysc
 
             state_delta_xysc = torch.cat((robot_state_delta_xysc, object_state_delta_xysc), dim=-1)
