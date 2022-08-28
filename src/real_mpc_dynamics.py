@@ -26,7 +26,6 @@ class DynamicsNetwork(nn.Module):
         layers = []
         for i in range(hidden_depth - 1):
             layers += [nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)]
-            # layers += [nn.utils.spectral_norm(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))]
             layers += [nn.ReLU()]
             layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
             layers += [nn.Dropout(p=dropout)]
@@ -182,8 +181,6 @@ class MPCAgent:
         for model in self.models:
             model.to(device)
         self.seed = seed
-        self.neighbors = []
-        self.state = None
         self.scale = scale
         self.ensemble = ensemble
         self.use_object = use_object
@@ -195,32 +192,57 @@ class MPCAgent:
 
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=1.0, norm_weight=0.0, sep_weight=0.0, discrim_weight=0.0, heading_diff_weight=0.0,
-                   robot_goals=False):
-        all_actions = np.random.uniform(*action_range, size=(n_steps, n_samples, action_range.shape[-1]))
-        state, prev_goal, goal, all_actions = dtu.as_tensor(state, prev_goal, goal, all_actions)
-        self.state = state      # for multi-robot
+                   robot_goals=False, mpc_softmax=False):
+        state, prev_goal, goal, action_range = dtu.as_tensor(state, prev_goal, goal, action_range)
         state = torch.tile(state, (n_samples, 1))
+
+        mpc_refine_iters = 4
+        alpha, n_best_losses = 0.1, int(n_samples * 0.1)
+        action_trajectory_dim = n_steps * action_range.shape[-1]
+        action_dist = torch.distributions.uniform.Uniform(*action_range)
+
+        action_mean = torch.zeros(action_trajectory_dim)
+        action_std = torch.ones(action_trajectory_dim)
         all_losses = torch.empty(n_steps, n_samples)
 
-        for i in range(n_steps):
-            action = all_actions[i]
-            with torch.no_grad():
-                state[:, 2] %= 2 * torch.pi
-                if self.use_object:
-                    state[:, 5] %= 2 * torch.pi
-                state, state_xysc = dtu.as_tensor(*self.get_prediction(state, action, sample=False, use_ensemble=False, xysc=True))
+        for k in range(mpc_refine_iters):
+            all_actions = action_dist.sample(sample_shape=(n_samples,)).reshape(n_steps, n_samples, action_range.shape[-1])
 
-            dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, discrim_loss, heading_diff_loss = \
-                    self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals, state_xysc=state_xysc)
+            for i in range(n_steps):
+                action = all_actions[i]
 
-            # normalize appropriate losses and compute total loss
-            # ADD BACK IN SEP_LOSS TERM LATER
-            all_losses[i] = (dist_weight + perp_weight * perp_loss 
-                            + heading_weight * heading_loss + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss + discrim_weight * discrim_loss
+                with torch.no_grad():
+                    state[:, 2] %= 2 * torch.pi
+                    if self.use_object:
+                        state[:, 5] %= 2 * torch.pi
 
-        # find index of best trajectory and return corresponding first action
-        best_idx = all_losses.sum(dim=0).argmin()
-        return all_actions[0, best_idx]
+                    state, state_xysc = dtu.as_tensor(*self.get_prediction(state, action, sample=False, use_ensemble=False, xysc=True))
+                    dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, discrim_loss, heading_diff_loss = \
+                            self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals, state_xysc=state_xysc)
+
+                # normalize appropriate losses and compute total loss
+                all_losses[i] = (dist_weight + perp_weight * perp_loss + norm_weight * norm_loss + heading_weight * heading_loss
+                                    + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss \
+                                    + discrim_weight * discrim_loss
+
+            trajectory_losses = all_losses.sum(dim=0)
+            _, best_losses_idx = torch.topk(trajectory_losses, n_best_losses)
+            best_actions = all_actions[best_losses_idx]
+            best_actions_mean = best_actions.reshape(-1, action_trajectory_dim).mean(dim=0)
+            best_actions_std = best_actions.reshape(-1, action_trajectory_dim).std(dim=0)
+            action_std = alpha * best_actions_std + (1 - alpha) * action_std
+
+            if mpc_softmax:
+                gamma = 1.
+                exp_loss = torch.exp(gamma * -trajectory_losses)
+                weighted_actions = (exp_loss * all_actions.reshape(n_samples, action_trajectory_dim)).sum(dim=0)
+                action_mean = weighted_actions / exp_loss.sum()
+            else:
+                action_mean = alpha * best_actions_mean + (1 - alpha) * action_mean
+
+            action_dist = torch.distributions.normal.Normal(action_mean, action_std)
+
+        return action_mean[:action_range.shape[-1]]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False, state_xysc=None):
         state, prev_goal, goal = dtu.as_tensor(state, prev_goal, goal)
@@ -235,64 +257,68 @@ class MPCAgent:
             goals = torch.tile(goal, (n_samples, 1))
             vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
 
+        effective_state = robot_state if robot_goals else object_state
+        x0, y0, current_angle = effective_state.T
+
         # separation loss
-        robot_state = state[:, :3]
-        object_state = state[:, 3:]
-
-        robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
-
-        state = state[:, :3] if robot_goals else state[:, 3:]
-
-        separation = (robot_state - object_state)[:,:2]
-        sep_loss = torch.norm(separation,dim=-1)
-
-        perp_denom = vec_to_goal.norm()
-        x1, y1, _ = prev_goal
-        x2, y2, _ = goal
+        robot_state, object_state = state[:, :3], state[:, 3:]
+        object_to_robot_xy = (robot_state - object_state)[:, :2]
+        sep_loss = object_to_robot_xy.norm(dim=1)
 
         # heading loss
-        x0, y0, current_angle = state.T
-        target_angle = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0]) + torch.pi
-
+        target_angle = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
         angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
-        angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(dim=0)[0]
+        angle_diff_dir, _ = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(dim=0)
 
         left = (angle_diff_side < torch.pi) * 2 - 1.
         forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
 
         heading_loss = angle_diff_dir
-
         heading_loss[forward == -1] = (heading_loss[forward == -1] + torch.pi) % (2 * torch.pi)
         heading_loss, _ = torch.stack((heading_loss, 2 * torch.pi - heading_loss)).min(dim=0)
+
         if signed:
             heading_loss *= left * forward
 
         # dist loss
-        dist_loss = torch.norm((goals - state)[:, :2], dim=-1)
-        if signed:
-            vecs_to_goal_state = (goals - state)[:, :2]
-            target_angle = torch.atan2(vecs_to_goal_state[:, 1], vecs_to_goal_state[:, 0]) + torch.pi
+        dist_loss = (goals - effective_state)[:, :2].norm(dim=1)
 
-            angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
-            angle_diff_dir = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(axis=0)[0]
+        if signed:
+            vecs_to_goal_state = (goals - effective_state)[:, :2]
+            target_angle_state = torch.atan2(vecs_to_goal_state[:, 1], vecs_to_goal_state[:, 0]) + torch.pi
+
+            angle_diff_side = (target_angle_state - current_angle) % (2 * torch.pi)
+            angle_diff_dir, _ = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(dim=0)
             forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
             dist_loss *= forward
 
         # perp loss
+        x1, y1, _ = prev_goal
+        x2, y2, _ = goal
+        perp_denom = vec_to_goal.norm()
+
         perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
+
         if not signed:
             perp_loss = torch.abs(perp_loss)
 
+        # return relevant losses for current state
         if current:
             return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze()
 
+        # action norm loss
         norm_loss = -action[:, :-1].norm(dim=-1).squeeze()
+
+        # discriminator loss
         discrim_loss = -self.model.discriminator(state_xysc).squeeze()
 
-        print("Robot: {}, Object: {}".format(robot_theta, object_theta))
+        # object vs. robot heading loss
+        robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
         heading_diff = (robot_theta + torch.pi - object_theta) % (2 * torch.pi)
-        print("Diff: ", heading_diff)
         heading_diff_loss = torch.stack((heading_diff, 2 * torch.pi - heading_diff), dim=1).min(dim=1)[0].squeeze()
+
+        print(f"Robot: {robot_theta}, Object: {object_theta}")
+        print("Diff: ", heading_diff_loss)
 
         return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, discrim_loss, heading_diff_loss
 
