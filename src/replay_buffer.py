@@ -4,7 +4,7 @@ import numpy as np
 
 
 class ReplayBuffer:
-    def __init__(self, capacity=10000, state_dim=3, action_dim=2, next_state_dim=3):
+    def __init__(self, capacity=10000, state_dim=3, action_dim=2):
         self.states = np.empty((capacity, state_dim))
         self.actions = np.empty((capacity, action_dim))
 

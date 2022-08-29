@@ -25,17 +25,19 @@ class RealMPC():
         self.initialized = False
         self.epsilon = 0.0
         self.steps = 0
-        self.gradient_steps = 5
-        self.random_steps = 0 if pretrain else 500
+        self.gradient_steps = 2
+        self.random_steps = 0 if pretrain else 100
 
         self.save_path = SAVE_PATH
         self.robot_id = robot_id
         self.object_id = object_id
         self.mpc_softmax = mpc_softmax
+        self.use_object = (self.object_id >= 0)
 
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.5
+        # self.duration = 0.5
+        self.duration = 0.2
         self.robot_state = np.zeros(3)      # (x, y, theta)
         self.object_state = np.zeros(3)     # (x, y, theta)
 
@@ -43,34 +45,32 @@ class RealMPC():
         self.last_n_updates = 0
         self.not_found = False
         self.started = False
+        self.done = False
 
         self.n_avg_states = 1
         self.n_wait_updates = 1
         self.n_clip = 3
         self.flat_lim = 0.6
-        self.save_freq = 50
+        self.save_freq = 100000 # 50
 
         if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
             with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
                 self.replay_buffer = pkl.load(f)
         else:
-            self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=6, action_dim=2, next_state_dim=6)
+            state_dim = 6 if self.use_object else 3
+            self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=state_dim, action_dim=2)
 
-        self.states = []
-        self.actions = []
-        self.next_states = []
-        self.done = False
+        # rospy.init_node("laptop_client_mpc")
 
-        rospy.init_node("laptop_client_mpc")
+        # robot_id = self.robot_id if False else 0
+        # print(f"waiting for robot {robot_id} service")
+        # rospy.wait_for_service(f"/kami{robot_id}/server")
+        # self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
+        # print("connected to robot service")
 
-        print(f"waiting for robot {self.robot_id} service")
-        rospy.wait_for_service(f"/kami{self.robot_id}/server")
-        self.service_proxy = rospy.ServiceProxy(f"/kami{self.robot_id}/server", CommandAction)
-        print("connected to robot service")
-
-        print("waiting for /ar_pose_marker rostopic")
-        rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
-        print("subscribed to /ar_pose_marker")
+        # print("waiting for /ar_pose_marker rostopic")
+        # rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
+        # print("subscribed to /ar_pose_marker")
 
         self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
         if not os.path.exists(self.tag_offset_path) or calibrate:
@@ -93,23 +93,23 @@ class RealMPC():
         self.pretrain = pretrain
 
         # weights for MPC cost terms
-        self.perp_weight = 4.
-        self.heading_weight = 0.8
-        self.dist_weight = 3.0
-        self.norm_weight = 0.0
-        self.dist_bonus_factor = 10.
-        self.sep_weight = 0.0
-        self.discrim_weight = 0.
-        self.heading_diff_weight = 0.0
-
-        # self.perp_weight = 0.
-        # self.heading_weight = 0.
-        # self.dist_weight = 1.
+        # self.perp_weight = 4.
+        # self.heading_weight = 0.8
+        # self.dist_weight = 3.0
         # self.norm_weight = 0.0
-        # self.dist_bonus_factor = 0.
-        # self.sep_weight = 0.
+        # self.dist_bonus_weight = 10.
+        # self.sep_weight = 0.0
         # self.discrim_weight = 0.
         # self.heading_diff_weight = 0.0
+
+        self.perp_weight = 1.
+        self.heading_weight = 0.1
+        self.dist_weight = 1.
+        self.norm_weight = 0.0
+        self.dist_bonus_weight = 0.
+        self.sep_weight = 0.
+        self.discrim_weight = 0.
+        self.heading_diff_weight = 0.0
 
         self.plot_robot_states = []
         self.plot_object_states = []
@@ -124,8 +124,8 @@ class RealMPC():
         self.laps = 0
         self.n_prints = 0
 
-        self.agent = MPCAgent(seed=0, dist=True, scale=self.scale, hidden_dim=200, hidden_depth=2,
-                              lr=0.001, dropout=0.2, ensemble=1, use_object=True)
+        self.agent = MPCAgent(seed=0, dist=True, scale=self.scale, hidden_dim=250, hidden_depth=2,
+                              lr=0.001, dropout=0.0, ensemble=1, use_object=self.use_object)
 
         if pretrain:
             self.train_model()
@@ -137,30 +137,25 @@ class RealMPC():
         self.initialized = True
 
     def calibrate(self):
-        if os.path.exists(self.tag_offset_path):
-            tag_offsets = np.load(self.tag_offset_path)
-        else:
-            tag_offsets = np.zeros(10)
+        tag_offsets = np.zeros(10)
 
         input(f"Place robot/object on the left calibration point, aligned with the calibration line and hit enter.")
         left_state = self.get_state(wait=False)
         input(f"Place robot/object on the right calibration point, aligned with the calibration line and hit enter.")
         right_state = self.get_state(wait=False)
 
-        robot_left_state, object_left_state = left_state[:3], left_state[3:]
-        robot_right_state, object_right_state = right_state[:3], right_state[3:]
-
+        robot_left_state, robot_right_state = left_state[:3], right_state[:3]
         true_robot_vector = (robot_left_state - robot_right_state)[:2]
         true_robot_angle = np.arctan2(true_robot_vector[1], true_robot_vector[0])
-
-        true_object_vector = (object_left_state - object_right_state)[:2]
-        true_object_angle = np.arctan2(true_object_vector[1], true_object_vector[0])
-
         measured_robot_angle = robot_left_state[2]
-        measured_object_angle = object_left_state[2]
-
         tag_offsets[self.robot_id] = true_robot_angle - measured_robot_angle
-        tag_offsets[self.object_id] = true_object_angle - measured_object_angle
+
+        if self.use_object:
+            object_left_state, object_right_state = left_state[3:], right_state[3:]
+            true_object_vector = (object_left_state - object_right_state)[:2]
+            true_object_angle = np.arctan2(true_object_vector[1], true_object_vector[0])
+            measured_object_angle = object_left_state[2]            
+            tag_offsets[self.object_id] = true_object_angle - measured_object_angle
 
         np.save(self.tag_offset_path, tag_offsets)
 
@@ -176,7 +171,7 @@ class RealMPC():
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
         discrim_training_losses = np.array(discrim_training_losses).squeeze()
-        discrim_test_losses = np.array(discrim_training_losses).squeeze()
+        discrim_test_losses = np.array(discrim_test_losses).squeeze()
 
         print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
         print("MIN TEST LOSS:", test_losses.min())
@@ -255,7 +250,10 @@ class RealMPC():
             state[1] = marker.pose.pose.position.y
             state[2] = z % (2 * np.pi)
 
-        self.not_found = not (found_robot and found_object)
+        if self.use_object:
+            self.not_found = not (found_robot and found_object)
+        else:
+            self.not_found = not found_robot
         self.n_updates += 0 if self.not_found else 1
 
         if self.not_found:
@@ -367,7 +365,11 @@ class RealMPC():
             robot_state = self.robot_state.copy()
             object_state = self.object_state.copy()
 
-        current_state = np.concatenate((robot_state, object_state), axis=0)
+        if self.use_object:
+            current_state = np.concatenate((robot_state, object_state), axis=0)
+        else:
+            current_state = robot_state
+
         return current_state
 
     def get_take_action(self, state):
@@ -381,7 +383,7 @@ class RealMPC():
                                            heading_weight=self.heading_weight, dist_weight=self.dist_weight,
                                            norm_weight=self.norm_weight, sep_weight=self.sep_weight if self.started else 0.,
                                            discrim_weight=self.discrim_weight, heading_diff_weight=self.heading_diff_weight,
-                                           robot_goals=self.robot_goals, mpc_softmax=self.mpc_softmax).detach().numpy()
+                                           dist_bonus_weight=self.dist_bonus_weight, robot_goals=self.robot_goals, mpc_softmax=self.mpc_softmax).detach().numpy()
         else:
             print("TAKING RANDOM ACTION")
             action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
@@ -504,7 +506,8 @@ class RealMPC():
                 pkl.dump(self.replay_buffer, f)
 
     def update_model_online(self):
-        if self.replay_buffer.full or self.replay_buffer.idx > 50:
+        return
+        if (self.replay_buffer.full or self.replay_buffer.idx > 50) and (self.pretrain or (not self.pretrain and self.steps >= self.random_steps)):
             for model in self.agent.models:
                 for _ in range(self.gradient_steps):
                     states, actions, next_states = self.replay_buffer.sample(200)
@@ -514,7 +517,7 @@ class RealMPC():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Do MPC.')
     parser.add_argument('-robot_id', type=int, help='robot id for rollout')
-    parser.add_argument('-object_id', type=int, help='object id for rollout')
+    parser.add_argument('-object_id', type=int, default=-1, help='object id for rollout')
     parser.add_argument('-mpc_steps', type=int)
     parser.add_argument('-mpc_samples', type=int)
     parser.add_argument('-n_rollouts', type=int)
@@ -526,7 +529,7 @@ if __name__ == '__main__':
     parser.add_argument('-pretrain', action='store_true')
     parser.add_argument('-robot_goals', action='store_true')
     parser.add_argument('-scale', action='store_true')
-    parser.add_argument('mpc_softmax', action='store_true')
+    parser.add_argument('-mpc_softmax', action='store_true')
 
     args = parser.parse_args()
 
