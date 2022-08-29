@@ -194,7 +194,7 @@ class MPCAgent:
         original_state = state
 
         mpc_refine_iters = 5
-        gamma = 30000
+        gamma = 35000
         alpha = 0.9
         n_best_losses = 10
         action_trajectory_dim = n_steps * action_range.shape[-1]
@@ -209,14 +209,6 @@ class MPCAgent:
             all_actions = action_dist.sample(sample_shape=(n_samples,)).reshape(n_samples, n_steps, action_range.shape[-1]).transpose(0, 1)
             all_actions = all_actions.clamp(action_range[0, 0], action_range[1, 0])
             state = torch.tile(original_state, (n_samples, 1))
-
-            # lap: 1
-            # rows: (dist, perp, heading, total)
-            # cols: (mean, std, min, max)
-            # DATA: [[0.06331064 0.05581292 0.00368586 0.21924987]
-            #  [0.0300212  0.04130514 0.0000391  0.17345059]
-            #  [0.4122588  0.3722118  0.00584722 1.5596571 ]
-            #  [0.13455771 0.10363473 0.00776965 0.39579672]] 
 
             for i in range(n_steps):
                 action = all_actions[i]
@@ -239,7 +231,7 @@ class MPCAgent:
                                     + discrim_weight * discrim_loss + 0 * (dist_bonus + 10 * dist_bonus2 + 100 * dist_bonus3)
 
             trajectory_losses = all_losses.sum(dim=0)
-            # trajectory_losses = trajectory_losses / trajectory_losses.sum()
+            trajectory_losses = trajectory_losses / trajectory_losses.sum()
 
             if mpc_refine_iters > 1:
                 _, best_losses_idx = torch.topk(-trajectory_losses, n_best_losses)
@@ -266,6 +258,7 @@ class MPCAgent:
                 # set_trace()
                 return all_actions[0, best_idx]
 
+        # return trajectory_mean[:action_range.shape[-1]]
         return best_trajectories[0, :action_range.shape[-1]]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False, state_xysc=None):

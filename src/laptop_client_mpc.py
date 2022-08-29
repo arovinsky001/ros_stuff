@@ -26,7 +26,7 @@ class RealMPC():
         self.epsilon = 0.0
         self.steps = 0
         self.gradient_steps = 2
-        self.random_steps = 0 if pretrain else 100
+        self.random_steps = 0 if pretrain else 500
 
         self.save_path = SAVE_PATH
         self.robot_id = robot_id
@@ -51,7 +51,7 @@ class RealMPC():
         self.n_wait_updates = 1
         self.n_clip = 3
         self.flat_lim = 0.6
-        self.save_freq = 100000 # 50
+        self.save_freq = 50
 
         if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
             with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
@@ -60,17 +60,17 @@ class RealMPC():
             state_dim = 6 if self.use_object else 3
             self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=state_dim, action_dim=2)
 
-        # rospy.init_node("laptop_client_mpc")
+        rospy.init_node("laptop_client_mpc")
 
-        # robot_id = self.robot_id if False else 0
-        # print(f"waiting for robot {robot_id} service")
-        # rospy.wait_for_service(f"/kami{robot_id}/server")
-        # self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
-        # print("connected to robot service")
+        robot_id = self.robot_id if False else 0
+        print(f"waiting for robot {robot_id} service")
+        rospy.wait_for_service(f"/kami{robot_id}/server")
+        self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
+        print("connected to robot service")
 
-        # print("waiting for /ar_pose_marker rostopic")
-        # rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
-        # print("subscribed to /ar_pose_marker")
+        print("waiting for /ar_pose_marker rostopic")
+        rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_state, queue_size=1)
+        print("subscribed to /ar_pose_marker")
 
         self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
         if not os.path.exists(self.tag_offset_path) or calibrate:
@@ -102,8 +102,8 @@ class RealMPC():
         # self.discrim_weight = 0.
         # self.heading_diff_weight = 0.0
 
-        self.perp_weight = 1.
-        self.heading_weight = 0.1
+        self.perp_weight = 0.
+        self.heading_weight = 0.
         self.dist_weight = 1.
         self.norm_weight = 0.0
         self.dist_bonus_weight = 0.
