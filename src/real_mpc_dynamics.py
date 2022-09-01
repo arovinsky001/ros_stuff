@@ -18,6 +18,30 @@ import data_utils as dtu
 pi = torch.pi
 device = torch.device("cpu")
 
+# rows: (dist, perp, heading, total)
+# cols: (mean, std, min, max)
+# DATA: [[0.04219189 0.03084236 0.00235231 0.16994911]
+#  [0.02027672 0.02345186 0.00000654 0.16348039]
+#  [0.27874293 0.21315557 0.0010314  1.14644289]
+#  [0.04219189 0.03084236 0.00235231 0.16994911]]
+
+# 200 samples
+# rows: (dist, perp, heading, total)
+# cols: (mean, std, min, max)
+# DATA: [[0.12418899 0.09081132 0.0149498  0.40099999]
+#  [0.06070356 0.07252411 0.00001037 0.26366729]
+#  [0.55921582 0.44112111 0.00212717 1.54231215]
+#  [0.12418899 0.09081132 0.0149498  0.40099999]]
+
+# 500 samples
+# rows: (dist, perp, heading, total)
+# cols: (mean, std, min, max)
+# DATA: [[0.24072483 0.14470543 0.01090682 0.55046976]
+#  [0.1385723  0.1326446  0.00016232 0.4843801 ]
+#  [0.7081059  0.46009894 0.00321484 1.56313467]
+#  [0.24072483 0.14470543 0.01090682 0.55046976]]
+
+
 
 class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
@@ -32,7 +56,7 @@ class DynamicsNetwork(nn.Module):
         layers += [nn.Linear(hidden_dim, output_dim)]
         self.model = nn.Sequential(*layers)
         self.output_dim = output_dim
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True, weight_decay=1e-4)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True)
         self.scale = scale
         self.dist = dist
         self.use_object = use_object
@@ -49,7 +73,7 @@ class DynamicsNetwork(nn.Module):
             if hasattr(m.bias, 'data'):
                 m.bias.data.fill_(0.0)
 
-    def forward(self, state, action, scale=True, sample=False, return_dist=False):
+    def forward(self, state, action, scale_input=True, sample=False, return_dist=False):
         state, action = dtu.as_tensor(state, action)
 
         if len(state.shape) == 1:
@@ -58,7 +82,7 @@ class DynamicsNetwork(nn.Module):
             action = action[None, :]
 
         state_sc = self.dtu.state_to_model_input(state)
-        if self.scale and scale:
+        if self.scale and scale_input:
             state_sc, action = self.get_scaled_input(state_sc, action)
 
         state_action = torch.cat([state_sc, action], dim=1).float()
@@ -86,8 +110,9 @@ class DynamicsNetwork(nn.Module):
 
         if self.dist:
             dist = self(state, action, return_dist=True)
-            state_delta_scaled = self.get_scaled_output(state_delta).detach()
-            loss = -dist.log_prob(state_delta_scaled).sum()
+            if self.scale:
+                state_delta = self.get_scaled_output(state_delta).detach()
+            loss = -dist.log_prob(state_delta).sum()
         else:
             pred_state_delta = self(state, action)
             loss = F.mse_loss(pred_state_delta, state_delta, reduction='mean')
@@ -104,8 +129,8 @@ class DynamicsNetwork(nn.Module):
     def set_scalers(self, state, action, next_state):
         state, action, next_state = dtu.dcn(state, action, next_state)
         input_state = self.dtu.state_to_model_input(state)
-        state_delta = self.dtu.state_delta_xysc(state, next_state)
         state_action = np.concatenate([input_state, action], axis=1)
+        state_delta = self.dtu.state_delta_xysc(state, next_state)
 
         self.input_scaler = StandardScaler().fit(state_action)
         self.output_scaler = StandardScaler().fit(state_delta)
@@ -173,7 +198,7 @@ class MPCAgent:
         assert ensemble > 0
         input_dim = output_dim = 8 if use_object else 4
 
-        self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object)
+        self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
                                 for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
@@ -189,11 +214,10 @@ class MPCAgent:
 
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=1.0, norm_weight=0.0, sep_weight=0.0, discrim_weight=0.0, heading_diff_weight=0.0,
-                   dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False):
+                   dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5):
         state, prev_goal, goal, action_range = dtu.as_tensor(state, prev_goal, goal, action_range)
         original_state = state
 
-        mpc_refine_iters = 5
         gamma = 35000
         alpha = 0.9
         n_best_losses = 10
@@ -231,7 +255,7 @@ class MPCAgent:
                                     + discrim_weight * discrim_loss + 0 * (dist_bonus + 10 * dist_bonus2 + 100 * dist_bonus3)
 
             trajectory_losses = all_losses.sum(dim=0)
-            trajectory_losses = trajectory_losses / trajectory_losses.sum()
+            # trajectory_losses = trajectory_losses / trajectory_losses.sum()
 
             if mpc_refine_iters > 1:
                 _, best_losses_idx = torch.topk(-trajectory_losses, n_best_losses)
@@ -439,7 +463,7 @@ class MPCAgent:
                 tqdm.write(f"{i+1}: train loss: {train_loss_mean:.5f} | test loss: {test_loss_mean:.5f}")
 
             print("\n\nTRAINING DISCRIMINATOR\n")
-            batch_size = 100
+            # batch_size = 100
             n_batches = int(np.ceil(len(train_state) / batch_size))
 
             for i in tqdm(range(-1, discrim_epochs), desc="Epoch", position=0, leave=False):
