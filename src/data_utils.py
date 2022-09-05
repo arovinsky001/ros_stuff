@@ -71,12 +71,12 @@ class DataUtils:
         """
         state = as_tensor(state)
 
-        robot_xy, robot_sc = state[:, :2], state[:, 2:4]
-        robot_theta = torch.atan2(robot_sc[:, 1], robot_sc[:, 0])
+        robot_xy, robot_sin, robot_cos = state[:, :2], state[:, 2], state[:, 3]
+        robot_theta = torch.atan2(robot_sin, robot_cos)
 
         if self.use_object:
-            object_xy, object_sc = state[:, 4:6], state[:, 6:]
-            object_theta = torch.atan2(object_sc[:, 1], object_sc[:, 0])
+            object_xy, object_sin, object_cos = state[:, 4:6], state[:, 6], state[:, 7]
+            object_theta = torch.atan2(object_sin, object_cos)
             full_state = torch.cat((robot_xy, robot_theta[:, None], object_xy, object_theta[:, None]), dim=1)
         else:
             full_state = torch.cat((robot_xy, robot_theta[:, None]), dim=1)
