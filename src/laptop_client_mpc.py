@@ -180,7 +180,7 @@ class RealMPC():
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=800, discrim_epochs=5, batch_size=1000, use_all_data=False)
+                states, actions, next_states, set_scalers=True, epochs=2100, discrim_epochs=5, batch_size=1000, use_all_data=False)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -423,13 +423,7 @@ class RealMPC():
             self.time_elapsed += self.duration if self.started else 0
         else:
             print("TAKING RANDOM ACTION")
-            if self.steps % 11 == 0:
-                if self.steps % 2 == 0:
-                    action = np.array([0.99, -0.99])
-                else:
-                    action = np.array([-0.99, 0.99])
-            else:
-                action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
+            action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
@@ -514,7 +508,6 @@ class RealMPC():
             print("cols: (mean, std, min, max)")
             print("DATA:", data, "\n")
             self.time_elapsed = 0.
-
             self.started = False
             self.plot_states_and_goals()
             plt.savefig("/home/bvanbuskirk/Desktop/lap_plots/Transitions:{}_robot:{}".format(self.replay_buffer.idx, self.robot_goals))
