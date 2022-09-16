@@ -295,7 +295,7 @@ class RealMPC():
             state_for_last_goal = self.robot_state if self.robot_goals else self.object_state
             last_goal = self.last_goal if self.started else state_for_last_goal
             dist_loss, heading_loss, perp_loss = self.agent.compute_losses(self.get_state(wait=False), last_goal, self.get_goal(), current=True, robot_goals=self.robot_goals)
-            total_loss = dist_loss * self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight
+            total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight)
 
             if self.started:
                 self.stamped_losses[1:] = self.stamped_losses[:-1]
@@ -380,11 +380,15 @@ class RealMPC():
     def get_state(self, wait=True):
         if self.n_avg_states > 1 and wait:
             robot_states, object_states = [], []
+            time = rospy.get_time()
             while len(robot_states) < self.n_avg_states:
                 if wait:
                     if self.n_updates == self.last_n_updates:
-                        rospy.sleep(0.0001)
+                        if rospy.get_time() - time > 2:
+                            return None
+                        rospy.sleep(0.001)
                     else:
+                        time = rospy.get_time()
                         robot_states.append(self.robot_state.copy())
                         object_states.append(self.object_state.copy())
                         self.last_n_updates = self.n_updates
@@ -394,7 +398,10 @@ class RealMPC():
         else:
             if wait:
                 while self.n_updates == self.last_n_updates:
-                    rospy.sleep(0.0001)
+                    time = rospy.get_time()
+                    if rospy.get_time() - time > 2:
+                        return None
+                    rospy.sleep(0.001)
                 self.last_n_updates = self.n_updates
 
             robot_state = self.robot_state.copy()
@@ -419,7 +426,7 @@ class RealMPC():
                                            norm_weight=self.norm_weight, sep_weight=self.sep_weight if self.started else 0.,
                                            discrim_weight=self.discrim_weight, heading_diff_weight=self.heading_diff_weight,
                                            dist_bonus_weight=self.dist_bonus_weight, robot_goals=self.robot_goals,
-                                           mpc_softmax=self.mpc_softmax, mpc_refine_iters=self.mpc_refine_iters).detach().numpy()
+                                           mpc_softmax=self.mpc_softmax, mpc_refine_iters=self.mpc_refine_iters)
             self.time_elapsed += self.duration if self.started else 0
         else:
             print("TAKING RANDOM ACTION")

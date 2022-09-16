@@ -5,7 +5,6 @@ from pdb import set_trace
 import numpy as np
 from matplotlib import pyplot as plt
 from sklearn import ensemble
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
 import torch
@@ -54,16 +53,16 @@ class DynamicsNetwork(nn.Module):
             layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
             layers += [nn.Dropout(p=dropout)]
         layers += [nn.Linear(hidden_dim, output_dim)]
-        self.model = nn.Sequential(*layers)
+        self.net = nn.Sequential(*layers)
         self.output_dim = output_dim
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, amsgrad=True)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.scale = scale
         self.dist = dist
         self.use_object = use_object
         self.std = std
         self.input_scaler = None
         self.output_scaler = None
-        self.model.apply(self._init_weights)
+        self.net.apply(self._init_weights)
         self.discriminator = DiscriminatorNetwork(use_object=use_object)
         self.dtu = dtu.DataUtils(use_object=use_object)
 
@@ -73,7 +72,7 @@ class DynamicsNetwork(nn.Module):
             if hasattr(m.bias, 'data'):
                 m.bias.data.fill_(0.0)
 
-    def forward(self, state, action, scale_input=True, sample=False, return_dist=False):
+    def forward(self, state, action, sample=False, return_dist=False):
         state, action = dtu.as_tensor(state, action)
 
         if len(state.shape) == 1:
@@ -81,24 +80,23 @@ class DynamicsNetwork(nn.Module):
         if len(action.shape) == 1:
             action = action[None, :]
 
-        state_sc = self.dtu.state_to_model_input(state)
-        if self.scale and scale_input:
-            state_sc, action = self.get_scaled_input(state_sc, action)
-
-        state_action = torch.cat([state_sc, action], dim=1).float()
+        input_state = self.dtu.state_to_model_input(state)
+        state_action = torch.cat([input_state, action], dim=1).float()
+        if self.scale:
+            state_action = self.standardize_input(state_action)
 
         if self.dist:
-            mean = self.model(state_action)
+            mean = self.net(state_action)
             std = torch.ones_like(mean) * 0.1
             dist = torch.distributions.normal.Normal(mean, std)
             if return_dist:
                 return dist
-            state_delta_model = dist.rsample() if sample else dist.loc
+            state_delta_model = dist.rsample() if sample else mean
         else:
-            state_delta_model = self.model(state_action)
+            state_delta_model = self.net(state_action)
 
         if self.scale:
-            state_delta_model = state_delta_model * self.output_std + self.output_mean
+            state_delta_model = self.unstandardize_output(state_delta_model)
 
         return state_delta_model
 
@@ -106,13 +104,14 @@ class DynamicsNetwork(nn.Module):
         self.train()
         state, action, next_state = dtu.as_tensor(state, action, next_state)
 
-        state_delta = self.dtu.state_delta_xysc(state, next_state)
+        state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
 
         if self.dist:
-            dist = self(state, action, return_dist=True)
             if self.scale:
-                state_delta = self.get_scaled_output(state_delta).detach()
-            loss = -dist.log_prob(state_delta).sum()
+                state_delta = self.standardize_output(state_delta)
+
+            dist = self(state, action, return_dist=True)
+            loss = -dist.log_prob(state_delta).mean()
         else:
             pred_state_delta = self(state, action)
             loss = F.mse_loss(pred_state_delta, state_delta, reduction='mean')
@@ -127,27 +126,26 @@ class DynamicsNetwork(nn.Module):
         return self.discriminator.update(self, state, action, next_state)
 
     def set_scalers(self, state, action, next_state):
-        state, action, next_state = dtu.dcn(state, action, next_state)
+        state, action, next_state = dtu.as_tensor(state, action, next_state)
         input_state = self.dtu.state_to_model_input(state)
-        state_action = np.concatenate([input_state, action], axis=1)
+
+        state_action = torch.cat([input_state, action], axis=1)
         state_delta = self.dtu.state_delta_xysc(state, next_state)
 
-        self.input_scaler = StandardScaler().fit(state_action)
-        self.output_scaler = StandardScaler().fit(state_delta)
+        self.input_mean = state_action.mean(dim=0)
+        self.input_std = state_action.std(dim=0)
 
-        self.output_mean = dtu.as_tensor(self.output_scaler.mean_)
-        self.output_std = dtu.as_tensor(self.output_scaler.scale_)
+        self.output_mean = state_delta.mean(dim=0)
+        self.output_std = state_delta.std(dim=0)
 
-    def get_scaled_input(self, state, action):
-        model_input = np.concatenate([state, action], axis=1)
-        scaled_input = self.input_scaler.transform(model_input)
-        scaled_state = scaled_input[:, :state.shape[-1]]
-        scaled_action = scaled_input[:, state.shape[-1]:]
-        return dtu.as_tensor(scaled_state, scaled_action)
+    def standardize_input(self, model_input):
+        return (model_input - self.input_mean) / self.input_std
 
-    def get_scaled_output(self, state_delta):
-        scaled_state_delta = self.output_scaler.transform(state_delta)
-        return dtu.as_tensor(scaled_state_delta)
+    def standardize_output(self, model_output):
+        return (model_output - self.output_mean) / self.output_std
+
+    def unstandardize_output(self, model_output):
+        return model_output * self.output_std + self.output_mean
 
 
 class DiscriminatorNetwork(nn.Module):
@@ -165,7 +163,7 @@ class DiscriminatorNetwork(nn.Module):
             nn.Linear(hidden_dim * 2, 1),
             nn.Sigmoid(),
         ])
-        self.optimizer = torch.optim.Adam(self.classifier.parameters(), lr=lr, amsgrad=True)
+        self.optimizer = torch.optim.Adam(self.classifier.parameters(), lr=lr)
 
     def forward(self, state):
         if len(state.shape) == 1:
@@ -215,78 +213,75 @@ class MPCAgent:
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=1.0, norm_weight=0.0, sep_weight=0.0, discrim_weight=0.0, heading_diff_weight=0.0,
                    dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5):
-        state, prev_goal, goal, action_range = dtu.as_tensor(state, prev_goal, goal, action_range)
         original_state = state
 
         gamma = 35000
         alpha = 0.9
         n_best_losses = 10
-        action_trajectory_dim = n_steps * action_range.shape[-1]
-        trajectory_range = torch.tile(action_range, (1, n_steps))
-        action_dist = torch.distributions.uniform.Uniform(*trajectory_range)
+        action_dim = action_range.shape[-1]
+        action_trajectory_dim = n_steps * action_dim
+        all_actions = np.random.uniform(*action_range, size=(n_samples, n_steps, action_dim))
 
-        trajectory_mean = torch.zeros(action_trajectory_dim)
-        trajectory_std = torch.zeros(action_trajectory_dim)
-        all_losses = torch.empty(n_steps, n_samples)
+        trajectory_mean = np.zeros(action_trajectory_dim)
+        trajectory_std = np.zeros(action_trajectory_dim)
+        all_losses = np.empty(n_samples, n_steps)
 
         for k in range(mpc_refine_iters):
-            all_actions = action_dist.sample(sample_shape=(n_samples,)).reshape(n_samples, n_steps, action_range.shape[-1]).transpose(0, 1)
-            all_actions = all_actions.clamp(action_range[0, 0], action_range[1, 0])
-            state = torch.tile(original_state, (n_samples, 1))
+            state = np.tile(original_state, (n_samples, 1))
+            if k > 1:
+                all_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
+                all_actions = np.clip(all_actions, *action_range)
 
             for i in range(n_steps):
-                action = all_actions[i]
+                action = all_actions[:, i]
+                state, state_xysc = self.get_prediction(state, action, sample=False, use_ensemble=False, xysc=True)
 
-                with torch.no_grad():
-                    state[:, 2] %= 2 * torch.pi
-                    if self.use_object:
-                        state[:, 5] %= 2 * torch.pi
+                dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, discrim_loss, heading_diff_loss = \
+                        self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals, state_xysc=state_xysc)
 
-                    state, state_xysc = dtu.as_tensor(*self.get_prediction(state, action, sample=False, use_ensemble=False, xysc=True))
-                    dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, discrim_loss, heading_diff_loss = \
-                            self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals, state_xysc=state_xysc)
-
-                dist_bonus = -(dist_loss < 0.2).float()
-                dist_bonus2 = -(dist_loss < 0.1).float()
-                dist_bonus3 = -(dist_loss < 0.04).float()
+                dist_bonus = -(dist_loss < 0.2).astype('float')
+                dist_bonus2 = -(dist_loss < 0.1).astype('float')
+                dist_bonus3 = -(dist_loss < 0.04).astype('float')
                 # normalize appropriate losses and compute total loss
-                all_losses[i] = (dist_weight + perp_weight * perp_loss + norm_weight * norm_loss + heading_weight * heading_loss
+                all_losses[:, i] = (dist_weight + perp_weight * perp_loss + norm_weight * norm_loss + heading_weight * heading_loss
                                     + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss \
                                     + discrim_weight * discrim_loss + 0 * (dist_bonus + 10 * dist_bonus2 + 100 * dist_bonus3)
 
-            trajectory_losses = all_losses.sum(dim=0)
+            trajectory_losses = all_losses.sum(axis=1)
             # trajectory_losses = trajectory_losses / trajectory_losses.sum()
 
             if mpc_refine_iters > 1:
-                _, best_losses_idx = torch.topk(-trajectory_losses, n_best_losses)
-                action_trajectories = all_actions.transpose(0, 1).reshape(n_samples, action_trajectory_dim)
-                best_trajectories = action_trajectories[best_losses_idx]
-                best_trajectories_mean = best_trajectories.mean(dim=0)
-                best_trajectories_std = best_trajectories.std(dim=0)
-                trajectory_std = alpha * best_trajectories_std + (1 - alpha) * trajectory_std
+                action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
 
                 if mpc_softmax:
                     print("SOFTMAX")
-                    exp_loss = torch.exp(gamma * -trajectory_losses)
-                    weighted_trajectories = (exp_loss[:, None] * action_trajectories).sum(dim=0)
-                    trajectory_mean = weighted_trajectories / exp_loss.sum()
+                    weights = np.exp(gamma * -trajectory_losses)
+                    weights_sum = weights.sum()
+                    weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)
+                    # weighted_std =
+                    trajectory_mean = weighted_trajectories / weights.sum()
                 else:
-                    trajectory_mean = alpha * best_trajectories_mean + (1 - alpha) * trajectory_mean
+                    _, best_losses_idx = np.argsort(-trajectory_losses)[-n_best_losses::-1]
+                    action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
+                    best_trajectories = action_trajectories[best_losses_idx]
+                    best_trajectories_mean = best_trajectories.mean(axis=0)
+                    best_trajectories_std = best_trajectories.std(axis=0)
 
-                normal_action = all_actions[0, best_losses_idx[0]]
+                    trajectory_mean = alpha * best_trajectories_mean + (1 - alpha) * trajectory_mean
+                    trajectory_std = alpha * best_trajectories_std + (1 - alpha) * trajectory_std
+
+                normal_action = all_actions[best_losses_idx[0], 0]
                 # set_trace()
-                trajectory_std, _ = torch.stack((trajectory_std, torch.ones_like(trajectory_std) * 0.02)).max(dim=0)
-                action_dist = torch.distributions.normal.Normal(trajectory_mean, trajectory_std)
+                trajectory_std = np.stack((trajectory_std, np.ones_like(trajectory_std) * 0.02)).max(axis=0)
             else:
                 best_idx = trajectory_losses.argmin()
                 # set_trace()
-                return all_actions[0, best_idx]
+                return all_actions[best_idx, 0]
 
         # return trajectory_mean[:action_range.shape[-1]]
         return best_trajectories[0, :action_range.shape[-1]]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False, state_xysc=None):
-        state, prev_goal, goal = dtu.as_tensor(state, prev_goal, goal)
         vec_to_goal = (goal - prev_goal)[:2]
 
         if current:
@@ -295,14 +290,14 @@ class MPCAgent:
             vecs_to_goal = vec_to_goal[None, :]
         else:
             n_samples = len(state)
-            goals = torch.tile(goal, (n_samples, 1))
-            vecs_to_goal = torch.tile(vec_to_goal, (n_samples, 1))
+            goals = np.tile(goal, (n_samples, 1))
+            vecs_to_goal = np.tile(vec_to_goal, (n_samples, 1))
 
         if self.use_object:
             # separation loss
             robot_state, object_state = state[:, :3], state[:, 3:]
             object_to_robot_xy = (robot_state - object_state)[:, :2]
-            sep_loss = object_to_robot_xy.norm(dim=1)
+            sep_loss = np.linalg.norm(object_to_robot_xy, axis=1)
 
             effective_state = robot_state if robot_goals else object_state
         else:
@@ -312,48 +307,48 @@ class MPCAgent:
         x0, y0, current_angle = effective_state.T
 
         # heading loss
-        target_angle = torch.atan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
-        angle_diff_side = (target_angle - current_angle) % (2 * torch.pi)
-        angle_diff_dir, _ = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(dim=0)
+        target_angle = np.arctan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
+        angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
+        angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
 
-        left = (angle_diff_side < torch.pi) * 2 - 1.
-        forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
+        left = (angle_diff_side < np.pi) * 2 - 1.
+        forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
 
         heading_loss = angle_diff_dir
-        heading_loss[forward == -1] = (heading_loss[forward == -1] + torch.pi) % (2 * torch.pi)
-        heading_loss, _ = torch.stack((heading_loss, 2 * torch.pi - heading_loss)).min(dim=0)
+        heading_loss[forward == -1] = (heading_loss[forward == -1] + np.pi) % (2 * np.pi)
+        heading_loss = np.stack((heading_loss, 2 * np.pi - heading_loss)).min(axis=0)
 
         if signed:
             heading_loss *= left * forward
 
         # dist loss
-        dist_loss = (goals - effective_state)[:, :2].norm(dim=1)
+        dist_loss = np.linalg.norm((goals - effective_state)[:, :2], axis=1)
 
         if signed:
             vecs_to_goal_state = (goals - effective_state)[:, :2]
-            target_angle_state = torch.atan2(vecs_to_goal_state[:, 1], vecs_to_goal_state[:, 0]) + torch.pi
+            target_angle_state = np.arctan2(vecs_to_goal_state[:, 1], vecs_to_goal_state[:, 0])
 
-            angle_diff_side = (target_angle_state - current_angle) % (2 * torch.pi)
-            angle_diff_dir, _ = torch.stack((angle_diff_side, 2 * torch.pi - angle_diff_side)).min(dim=0)
-            forward = (angle_diff_dir < torch.pi / 2) * 2 - 1.
+            angle_diff_side = (target_angle_state - current_angle) % (2 * np.pi)
+            angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
+            forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
             dist_loss *= forward
 
         # perp loss
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
-        perp_denom = vec_to_goal.norm()
+        perp_denom = np.linalg.norm(vec_to_goal)
 
         perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
 
         if not signed:
-            perp_loss = torch.abs(perp_loss)
+            perp_loss = np.abs(perp_loss)
 
         # return relevant losses for current state
         if current:
             return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze()
 
         # action norm loss
-        norm_loss = -action[:, :-1].norm(dim=-1).squeeze()
+        norm_loss = -np.linalg.norm(action, axis=1).squeeze()
 
         # discriminator loss
         discrim_loss = -self.model.discriminator(state_xysc).squeeze()
@@ -361,8 +356,8 @@ class MPCAgent:
         # object vs. robot heading loss
         if self.use_object:
             robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
-            heading_diff = (robot_theta + torch.pi - object_theta) % (2 * torch.pi)
-            heading_diff_loss = torch.stack((heading_diff, 2 * torch.pi - heading_diff), dim=1).min(dim=1)[0].squeeze()
+            heading_diff = (robot_theta + np.pi - object_theta) % (2 * np.pi)
+            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), dim=1).min(axis=1).squeeze()
             print(f"Robot: {robot_theta}, Object: {object_theta}")
             print("Object Robot Heading Diff: ", heading_diff_loss)
         else:
@@ -372,12 +367,15 @@ class MPCAgent:
 
     def get_prediction(self, state, action, sample=False, delta=False, use_ensemble=False, model_no=0, xysc=False):
         """
-        Accepts state [x, y, theta, x, y, theta]
-        Returns next_state [x, y, theta, x, y, theta]
+        Accepts state [x, y, theta] or [x, y, theta, x, y, theta]
+        Returns next_state [x, y, theta] or [x, y, theta, x, y, theta]
         """
         if use_ensemble:
-            state_delta_sum = np.zeros((len(state), 8 if self.use_object else 4))
-            next_state_sum = np.zeros((len(state), 8 if self.use_object else 4))
+            state_delta_sum = torch.zeros((len(state), 8 if self.use_object else 4))
+            next_state_sum = torch.zeros((len(state), 6 if self.use_object else 3))
+            if xysc:
+                next_state_xysc_sum = torch.zeros((len(state), 8 if self.use_object else 4))
+
             for model in self.models:
                 model.eval()
 
@@ -386,29 +384,37 @@ class MPCAgent:
 
                 with torch.no_grad():
                     state_delta_model = model(state, action, sample=sample)
-                    state_xysc = model.dtu.state_to_xysc(state)
-                    next_state_model_xysc = state_xysc + state_delta_model
-                    next_state_model = model.dtu.state_from_xysc(next_state_model_xysc)
+                    next_state_model = self.dtu.compute_next_state(state, state_delta_model, xysc=xysc)
 
-                state_delta_sum += dtu.dcn(state_delta_model)
-                next_state_sum += dtu.dcn(next_state_model)
+                if xysc:
+                    next_state_model, next_state_model_xysc = next_state_model
+                    next_state_xysc_sum += dtu.dcn(next_state_model)
+
+                state_delta_sum += state_delta_model
+                next_state_sum += next_state_model
 
             state_delta_model = state_delta_sum / len(self.models)
             next_state_model = next_state_sum / len(self.models)
+            if xysc:
+                next_state_model_xysc = next_state_xysc_sum / len(self.models)
         else:
             model = self.models[model_no]
             model.eval()
 
             with torch.no_grad():
                 state_delta_model = model(state, action, sample=sample)
-                state_xysc = model.dtu.state_to_xysc(state)
-                next_state_model_xysc = state_xysc + state_delta_model
-                next_state_model = model.dtu.state_from_xysc(next_state_model_xysc)
+                next_state_model = self.dtu.compute_next_state(state, state_delta_model, xysc=xysc)
 
         if delta:
             return dtu.dcn(state_delta_model)
-        elif xysc:
+
+        if xysc:
+            next_state_model, next_state_model_xysc = next_state_model
             return dtu.dcn(next_state_model, next_state_model_xysc)
+
+        next_state_model[:, 2] %= 2 * np.pi
+        if self.use_object:
+            next_state_model[:, 5] %= 2 * np.pi
 
         return dtu.dcn(next_state_model)
 
@@ -642,7 +648,7 @@ if __name__ == '__main__':
                 training_losses = np.array(training_losses).squeeze()
                 test_losses = np.array(test_losses).squeeze()
                 discrim_training_losses = np.array(discrim_training_losses).squeeze()
-                discrim_test_losses = np.array(discrim_training_losses).squeeze()
+                discrim_test_losses = np.array(discrim_test_losses).squeeze()
 
                 print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
                 print("MIN TEST LOSS:", test_losses.min())
