@@ -29,8 +29,8 @@ class ReplayBuffer:
         n_stored = self.capacity if self.full else self.idx
         sample_size = min(n_stored, sample_size)
         stored_idxs = np.arange(n_stored)
-        valid_idxs = np.delete(stored_idxs, self.terminals[:n_stored])
-        valid_idxs = np.delete(valid_idxs, self.idx - 1)
+        # valid_idxs = np.delete(stored_idxs, self.terminals[:n_stored])
+        valid_idxs = np.delete(stored_idxs, self.idx - 1)
 
         sample_idx = np.random.choice(valid_idxs, sample_size)
         states = self.states[sample_idx]

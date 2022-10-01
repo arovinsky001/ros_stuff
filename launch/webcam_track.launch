@@ -3,17 +3,33 @@
 	<arg name="video_device"		default="/dev/video2" />
 	<arg name="image_width"			default="1920" />
 	<arg name="image_height"		default="1080" />
+	<arg name="framerate"		    default="60" />
 
 	<node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen" >
 	    <param name="video_device" value="$(arg video_device)" />
 		<param name="image_width" value="$(arg image_width)" />
 	    <param name="image_height" value="$(arg image_height)" />
+		<param name="framerate" value="$(arg framerate)" />
 	    <param name="pixel_format" value="yuyv" />
 	    <param name="camera_frame_id" value="usb_cam" />
 	    <param name="io_method" value="mmap"/>
   	</node>
 
 	<node name="image_proc" pkg="image_proc" type="image_proc" ns="usb_cam"/>
+
+	<!-- Video resizing -->
+	<node pkg="nodelet" type="nodelet" args="standalone image_proc/resize" name="resize_img">
+		<!-- remap input topics -->
+		<remap from="camera_image" to="/usb_cam/image_rect"/>
+		<remap from="camera_info" to="/usb_cam/camera_info"/>
+		<!-- remap output topics -->
+		<!-- <remap from="resize_image/image" to="camera_resize/image_rect"/>
+		<remap from="resize_image/camera_info" to="camera_resize/camera_info"/> -->
+		<param name="use_scale" type="int" value="0" />
+		<param name="width" type="int" value="$(arg image_width)" />
+  		<param name="height" type="int" value="$(arg image_height)" />
+	</node>
+
 
 	<arg name="marker_size"          default="10.9" />
     <arg name="max_new_marker_error" default="0.02" />

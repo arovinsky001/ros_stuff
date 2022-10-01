@@ -9,7 +9,7 @@ import rospy
 
 from real_mpc_dynamics import *
 from replay_buffer import ReplayBuffer
-from state_subscriber import StateSubscriber
+from state_publisher import StatePublisher
 
 from ros_stuff.msg import RobotCmd, ProcessedStates
 from ros_stuff.srv import CommandAction
@@ -27,23 +27,21 @@ np.random.seed(SEED)
 
 class RealMPC():
     def __init__(self, robot_id, object_id, mpc_steps, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
-                 new_buffer, pretrain, robot_goals, scale, mpc_softmax, save_freq, online, mpc_refine_iters, pretrain_samples):
+                 new_buffer, pretrain, robot_goals, scale, mpc_softmax, save_freq, online, mpc_refine_iters,
+                 pretrain_samples, random_steps, rate):
         # flags for different stages of eval
         self.started = False
         self.done = False
 
         # counters
         self.steps = 0
-        self.lag_states = 0
 
         # AR tag ids for state lookup
         self.robot_id = robot_id
         self.object_id = object_id
 
         # states
-        self.robot_state = np.zeros(3)
-        self.object_state = np.zeros(3)
-        self.corner_state = np.zeros(3)
+        self.robot_state = self.object_state = self.corner_state = None
 
         # MPC params
         self.mpc_steps = mpc_steps
@@ -58,16 +56,15 @@ class RealMPC():
         self.duration = 0.2
 
         # online data collection/learning params
-        self.random_steps = 0 if pretrain else 500
+        self.random_steps = 0 if pretrain else random_steps
         self.gradient_steps = 2
         self.online = online
         self.save_freq = save_freq
         self.pretrain_samples = pretrain_samples
 
         # system params
-        self.n_avg_states = 1
-        self.n_wait_updates = 1
         self.n_clip = 3
+        self.rate = rate
 
         # misc
         self.n_rollouts = n_rollouts
@@ -186,7 +183,7 @@ class RealMPC():
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=False)
+                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=True)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -241,17 +238,14 @@ class RealMPC():
         plt.show()
 
     def define_goal_trajectory(self):
-        while self.n_updates < 5:
-            rospy.sleep(0.0001)
-        self.front_left_corner = self.corner_state[:2].copy()
-        self.back_right_corner = self.base_state[:2].copy()
-        corner_range = self.front_left_corner - self.back_right_corner
+        while self.corner_state is None:
+            rospy.sleep(0.01)
 
         back_circle_center_rel = np.array([0.5, 0.65])
         front_circle_center_rel = np.array([0.5, 0.35])
 
-        self.back_circle_center = back_circle_center_rel * corner_range + self.back_right_corner
-        self.front_circle_center = front_circle_center_rel * corner_range + self.back_right_corner
+        self.back_circle_center = back_circle_center_rel * self.corner_state[:2]
+        self.front_circle_center = front_circle_center_rel * self.corner_state[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
     def update_state(self, msg):
@@ -269,7 +263,7 @@ class RealMPC():
             total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight)
 
             self.stamped_losses[1:] = self.stamped_losses[:-1]
-            self.stamped_losses[0] = [rospy.get_time()] + [i.detach().numpy() for i in [dist_loss, heading_loss, perp_loss, total_loss]]
+            self.stamped_losses[0] = [rospy.get_time()] + [i for i in [dist_loss, heading_loss, perp_loss, total_loss]]
 
     def record_plot_states(self):
         robot_state_to_plot = self.robot_state.copy()
@@ -282,13 +276,10 @@ class RealMPC():
             self.plot_states_and_goals()
 
     def run(self):
-        rospy.sleep(0.2)
-        while self.state_subscriber.n_full_updates < 3 and not rospy.is_shutdown():
-            print("WAITING FOR STATE SUBSCRIBER TO UPDATE")
-            rospy.sleep(0.2)
-
         self.first_plot = True
         self.init_goal = self.get_goal(random=False)
+
+        r = rospy.Rate(self.rate)
         while not rospy.is_shutdown():
             if self.started:
                 self.record_plot_states()
@@ -303,6 +294,8 @@ class RealMPC():
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
+
+            r.sleep()
 
     def plot_states_and_goals(self):
         plot_goals = np.array(self.plot_goals)
@@ -330,18 +323,8 @@ class RealMPC():
 
         state = self.get_state()
         action = self.get_take_action(state)
-        terminal = False
 
-        if self.n_full_updates == self.state_subscriber.n_full_updates:
-            self.lag_states += 1
-            if self.lag_states > self.max_lag_states:
-                print("\nHALTED DUE TO TRACKING LAG\n")
-                import pdb;pdb.set_trace()
-                terminal = True
-        else:
-            self.lag_states = 0
-
-        self.collect_training_data(state, action, terminal=terminal)
+        self.collect_training_data(state, action)
 
         if self.online:
             self.update_model_online()
@@ -411,12 +394,6 @@ class RealMPC():
         print("/////////////////////////////////////////////////")
 
         self.last_goal = goal.copy() if self.started else None
-        # n_updates = self.n_updates
-        # time = rospy.get_time()
-        # while self.n_updates - n_updates < self.n_wait_updates:
-        #     if rospy.get_time() - time > 2:
-        #         return None
-        #     rospy.sleep(0.001)
 
         return action
 
@@ -520,10 +497,12 @@ if __name__ == '__main__':
     parser.add_argument('-mpc_refine_iters', type=int, default=1)
     parser.add_argument('-pretrain_samples', type=int, default=500)
     parser.add_argument('-random_steps', type=int, default=500)
+    parser.add_argument('-rate', type=float, default=1.)
 
     args = parser.parse_args()
 
     r = RealMPC(args.robot_id, args.object_id, args.mpc_steps, args.mpc_samples, args.n_rollouts, args.tolerance,
                 args.lap_time, args.calibrate, args.plot, args.new_buffer, args.pretrain, args.robot_goals, args.scale,
-                args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples, args.random_steps)
+                args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
+                args.random_steps, args.rate)
     r.run()

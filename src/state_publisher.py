@@ -19,12 +19,15 @@ class StatePublisher:
         Usage: robot_state = self.states[self.name_to_id["robot"]]
         """
         self.base_id = base_id
+        self.base_frame = f"ar_marker_{base_id}"
         self.name_to_id = {"robot": robot_id,
                            "object": object_id,
                            "base": base_id,
                            "corner": corner_id}
 
         self.id_to_state = {id: np.zeros(3) for id in self.name_to_id.values()}
+
+        rospy.init_node("state_publisher")
 
         print("setting up tf buffer/listener")
         self.tf_buffer = tf2_ros.Buffer()
@@ -35,7 +38,8 @@ class StatePublisher:
         rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update, queue_size=1)
         print("subscribed to /ar_pose_marker")
 
-        self.publisher = rospy.Publisher("/processed_state", String, queue_size=1)
+        self.publisher = rospy.Publisher("/processed_state", ProcessedStates, queue_size=1)
+        rospy.spin()
 
     def update(self, msg):
         found_ids = [marker.id for marker in msg.markers]
@@ -44,7 +48,7 @@ class StatePublisher:
             return
 
         for marker in msg.markers:
-            if marker.id in self.ids.values() and marker.id != self.base_id:
+            if marker.id in self.id_to_state and marker.id != self.base_id:
                 state = self.id_to_state[marker.id]
             else:
                 continue
@@ -63,12 +67,12 @@ class StatePublisher:
                         tf2_ros.ExtrapolationException):
                     pass
 
-            t, r = pose.transform.translation, pose.transform.rotation
-            quat = [r.x, r.y, r.z, r.w]
+            p, o = pose.position, pose.orientation
+            quat = [o.x, o.y, o.z, o.w]
             roll, pitch, yaw = euler_from_quaternion(quat)
 
-            state[0] = t.x
-            state[1] = t.y
+            state[0] = p.x
+            state[1] = p.y
             state[2] = yaw
 
         pub_msg = ProcessedStates()

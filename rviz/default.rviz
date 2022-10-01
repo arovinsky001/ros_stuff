@@ -71,6 +71,8 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
+        ar_marker_1:
+          Value: true
         ar_marker_3:
           Value: true
         ar_marker_4:
@@ -85,6 +87,8 @@ Visualization Manager:
       Show Names: true
       Tree:
         usb_cam:
+          ar_marker_1:
+            {}
           ar_marker_3:
             {}
           ar_marker_4:
@@ -96,7 +100,7 @@ Visualization Manager:
     Background Color: 48; 48; 48
     Default Light: true
     Fixed Frame: ar_marker_3
-    Frame Rate: 30
+    Frame Rate: 60
   Name: root
   Tools:
     - Class: rviz/Interact
@@ -119,7 +123,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 6.054056167602539
+      Distance: 5.027266025543213
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -127,17 +131,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
+        X: 0.6230396032333374
+        Y: -0.8323208093643188
+        Z: 0.4900842308998108
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8053979873657227
+      Pitch: 0.4453977942466736
       Target Frame: <Fixed Frame>
-      Yaw: 0.7753980159759521
+      Yaw: 0.7553977966308594
     Saved: ~
 Window Geometry:
   Displays:
