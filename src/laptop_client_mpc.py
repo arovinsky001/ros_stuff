@@ -16,6 +16,8 @@ from ros_stuff.srv import CommandAction
 
 from ar_track_alvar_msgs.msg import AlvarMarkers
 from tf.transformations import euler_from_quaternion
+import tf2_ros
+import tf2_geometry_msgs
 
 # seed for reproducibility
 SEED = 0
@@ -66,7 +68,6 @@ class RealMPC():
         self.n_avg_states = 1
         self.n_wait_updates = 1
         self.n_clip = 3
-        self.max_lag_states = 3
 
         # misc
         self.n_rollouts = n_rollouts
@@ -185,7 +186,7 @@ class RealMPC():
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=2100, discrim_epochs=5, batch_size=1000, use_all_data=False)
+                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=False)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -240,20 +241,17 @@ class RealMPC():
         plt.show()
 
     def define_goal_trajectory(self):
-        # # self.front_left_corner = np.array([-0.1, -1.15])
-        # # self.back_right_corner = np.array([-1.9, 0.1])
-        # self.front_left_corner = np.array([-0.03, -1.4])
-        # self.back_right_corner = np.array([-2.5, 0.05])
-        # corner_range = self.back_right_corner - self.front_left_corner
-        corner_range = self.corner_state
+        while self.n_updates < 5:
+            rospy.sleep(0.0001)
+        self.front_left_corner = self.corner_state[:2].copy()
+        self.back_right_corner = self.base_state[:2].copy()
+        corner_range = self.front_left_corner - self.back_right_corner
 
-        # max distance between robot and object(gives adequate buffer space near perimeter)
-        max_sep_rel = abs(0.3/corner_range[0])
-        back_circle_center_rel = np.array([(0.75*max_sep_rel) + 0.25, 0.5])
-        front_circle_center_rel = np.array([0.75 - (0.75*max_sep_rel), 0.5])
+        back_circle_center_rel = np.array([0.5, 0.65])
+        front_circle_center_rel = np.array([0.5, 0.35])
 
-        self.back_circle_center = back_circle_center_rel * corner_range + self.front_left_corner
-        self.front_circle_center = front_circle_center_rel * corner_range + self.front_left_corner
+        self.back_circle_center = back_circle_center_rel * corner_range + self.back_right_corner
+        self.front_circle_center = front_circle_center_rel * corner_range + self.back_right_corner
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
     def update_state(self, msg):
@@ -312,7 +310,7 @@ class RealMPC():
         plot_object_states = np.array(self.plot_object_states)
         plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
         plt.plot(plot_robot_states[:, 0] * -1, plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
-        plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
+        # plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
         if self.first_plot:
             plt.legend()
             plt.ion()
@@ -363,6 +361,7 @@ class RealMPC():
         goal = self.get_goal()
         state_for_last_goal = state[:3] if self.robot_goals else state[3:]
         last_goal = self.last_goal if self.started else state_for_last_goal
+        last_goal = state_for_last_goal
 
         if self.steps >= self.random_steps:
             action = self.agent.mpc_action(state, last_goal, goal, self.action_range, n_steps=self.mpc_steps,
@@ -383,8 +382,6 @@ class RealMPC():
         action_req.right_pwm = action[1]
         action_req.duration = self.duration
 
-        # record n full updates just before taking action to check action was tracked
-        self.n_full_updates = self.state_subscriber.n_full_updates
         self.service_proxy(action_req, f"kami{self.robot_id}")
 
         time = rospy.get_time()
@@ -444,7 +441,7 @@ class RealMPC():
         #     theta = 2 * np.pi * (t_rel - 0.5) / 0.5
         #     center = self.back_circle_center
 
-        # theta -= np.pi / 4
+        theta -= np.pi / 2
         goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
         return np.block([goal, 0.0])
 
@@ -522,10 +519,11 @@ if __name__ == '__main__':
     parser.add_argument('-save_freq', type=int, default=50)
     parser.add_argument('-mpc_refine_iters', type=int, default=1)
     parser.add_argument('-pretrain_samples', type=int, default=500)
+    parser.add_argument('-random_steps', type=int, default=500)
 
     args = parser.parse_args()
 
     r = RealMPC(args.robot_id, args.object_id, args.mpc_steps, args.mpc_samples, args.n_rollouts, args.tolerance,
                 args.lap_time, args.calibrate, args.plot, args.new_buffer, args.pretrain, args.robot_goals, args.scale,
-                args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples)
+                args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples, args.random_steps)
     r.run()

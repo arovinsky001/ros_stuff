@@ -56,13 +56,13 @@ Visualization Manager:
       Value: true
     - Class: rviz/Image
       Enabled: true
-      Image Topic: /usb_cam/image_raw
+      Image Topic: /usb_cam/image_rect_color
       Max Value: 1
       Median window: 5
       Min Value: 0
       Name: Image
       Normalize Range: true
-      Queue Size: 2
+      Queue Size: 1
       Transport Hint: raw
       Unreliable: false
       Value: true
@@ -71,7 +71,9 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        ar_marker_0:
+        ar_marker_3:
+          Value: true
+        ar_marker_4:
           Value: true
         usb_cam:
           Value: true
@@ -83,7 +85,9 @@ Visualization Manager:
       Show Names: true
       Tree:
         usb_cam:
-          ar_marker_0:
+          ar_marker_3:
+            {}
+          ar_marker_4:
             {}
       Update Interval: 0
       Value: true
@@ -91,7 +95,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Default Light: true
-    Fixed Frame: usb_cam
+    Fixed Frame: ar_marker_3
     Frame Rate: 30
   Name: root
   Tools:
@@ -115,7 +119,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 2.3504350185394287
+      Distance: 6.054056167602539
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1

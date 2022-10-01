@@ -217,14 +217,14 @@ class MPCAgent:
 
         gamma = 35000
         alpha = 0.9
-        n_best_losses = 10
+        n_best_losses = 20
         action_dim = action_range.shape[-1]
         action_trajectory_dim = n_steps * action_dim
         all_actions = np.random.uniform(*action_range, size=(n_samples, n_steps, action_dim))
 
         trajectory_mean = np.zeros(action_trajectory_dim)
         trajectory_std = np.zeros(action_trajectory_dim)
-        all_losses = np.empty(n_samples, n_steps)
+        all_losses = np.empty((n_samples, n_steps))
 
         for k in range(mpc_refine_iters):
             state = np.tile(original_state, (n_samples, 1))
@@ -247,8 +247,14 @@ class MPCAgent:
                                     + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss \
                                     + discrim_weight * discrim_loss + 0 * (dist_bonus + 10 * dist_bonus2 + 100 * dist_bonus3)
 
-            trajectory_losses = all_losses.sum(axis=1)
+            # trajectory_losses = all_losses.sum(axis=1)
             # trajectory_losses = trajectory_losses / trajectory_losses.sum()
+
+            trajectory_losses = all_losses.sum(axis=1)
+            if mpc_softmax:
+                print("softmax")
+                trajectory_losses -= trajectory_losses.min()
+                trajectory_losses = trajectory_losses / trajectory_losses.sum()
 
             if mpc_refine_iters > 1:
                 action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
@@ -261,7 +267,7 @@ class MPCAgent:
                     # weighted_std =
                     trajectory_mean = weighted_trajectories / weights.sum()
                 else:
-                    _, best_losses_idx = np.argsort(-trajectory_losses)[-n_best_losses::-1]
+                    best_losses_idx = np.argsort(-trajectory_losses)[-n_best_losses:]
                     action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
                     best_trajectories = action_trajectories[best_losses_idx]
                     best_trajectories_mean = best_trajectories.mean(axis=0)
@@ -270,7 +276,7 @@ class MPCAgent:
                     trajectory_mean = alpha * best_trajectories_mean + (1 - alpha) * trajectory_mean
                     trajectory_std = alpha * best_trajectories_std + (1 - alpha) * trajectory_std
 
-                normal_action = all_actions[best_losses_idx[0], 0]
+                # normal_action = all_actions[best_losses_idx[0], 0]
                 # set_trace()
                 trajectory_std = np.stack((trajectory_std, np.ones_like(trajectory_std) * 0.02)).max(axis=0)
             else:
@@ -278,12 +284,11 @@ class MPCAgent:
                 # set_trace()
                 return all_actions[best_idx, 0]
 
-        # return trajectory_mean[:action_range.shape[-1]]
-        return best_trajectories[0, :action_range.shape[-1]]
+        return trajectory_mean[:action_range.shape[-1]]
+        # return best_trajectories[0, :action_range.shape[-1]]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False, state_xysc=None):
         vec_to_goal = (goal - prev_goal)[:2]
-
         if current:
             state = state[None, :]
             goals = goal[None, :]
@@ -351,7 +356,8 @@ class MPCAgent:
         norm_loss = -np.linalg.norm(action, axis=1).squeeze()
 
         # discriminator loss
-        discrim_loss = -self.model.discriminator(state_xysc).squeeze()
+        # discrim_loss = -self.model.discriminator(state_xysc).squeeze()
+        discrim_loss = 0
 
         # object vs. robot heading loss
         if self.use_object:
