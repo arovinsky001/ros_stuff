@@ -16,8 +16,10 @@ WORLD_FRAME = "usb_cam"
 class StatePublisher:
     def __init__(self, robot_id, object_id, base_id, corner_id):
         """
-        Usage: robot_state = self.states[self.name_to_id["robot"]]
+        Usage: robot_state = self.id_to_state[self.name_to_id["robot"]]
+                           = self.id_to_state[robot_id]
         """
+
         self.base_id = base_id
         self.base_frame = f"ar_marker_{base_id}"
         self.name_to_id = {"robot": robot_id,

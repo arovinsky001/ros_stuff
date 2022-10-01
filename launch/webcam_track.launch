@@ -15,21 +15,20 @@
 	    <param name="io_method" value="mmap"/>
   	</node>
 
-	<node name="image_proc" pkg="image_proc" type="image_proc" ns="usb_cam"/>
-
 	<!-- Video resizing -->
-	<node pkg="nodelet" type="nodelet" args="standalone image_proc/resize" name="resize_img">
+	<node name="resize_img" pkg="nodelet" type="nodelet" args="standalone image_proc/resize">
 		<!-- remap input topics -->
-		<remap from="camera_image" to="/usb_cam/image_rect"/>
+		<remap from="camera_image" to="/usb_cam/image_raw"/>
 		<remap from="camera_info" to="/usb_cam/camera_info"/>
 		<!-- remap output topics -->
-		<!-- <remap from="resize_image/image" to="camera_resize/image_rect"/>
-		<remap from="resize_image/camera_info" to="camera_resize/camera_info"/> -->
+		<remap from="resize_img/image" to="/usb_cam/image_raw"/>
+		<remap from="resize_img/camera_info" to="/usb_cam/camera_info"/>
 		<param name="use_scale" type="int" value="0" />
 		<param name="width" type="int" value="$(arg image_width)" />
   		<param name="height" type="int" value="$(arg image_height)" />
 	</node>
 
+	<node name="image_proc" pkg="image_proc" type="image_proc" ns="usb_cam"/>
 
 	<arg name="marker_size"          default="10.9" />
     <arg name="max_new_marker_error" default="0.02" />

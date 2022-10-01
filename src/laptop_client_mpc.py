@@ -9,15 +9,9 @@ import rospy
 
 from real_mpc_dynamics import *
 from replay_buffer import ReplayBuffer
-from state_publisher import StatePublisher
 
 from ros_stuff.msg import RobotCmd, ProcessedStates
 from ros_stuff.srv import CommandAction
-
-from ar_track_alvar_msgs.msg import AlvarMarkers
-from tf.transformations import euler_from_quaternion
-import tf2_ros
-import tf2_geometry_msgs
 
 # seed for reproducibility
 SEED = 0
@@ -201,8 +195,8 @@ class RealMPC():
         test_state, test_action = states[test_idx], actions[test_idx]
         test_state_delta = dtu.dcn(state_delta[test_idx])
 
-        pred_state_delta = dtu.dcn(self.agent.models[0](test_state, test_action, sample=False))
-        # pred_state_delta = agent.get_prediction(test_states, test_actions, sample=False, scale=args.scale, delta=True, use_ensemble=False)
+        # pred_state_delta = dtu.dcn(self.agent.models[0](test_state, test_action, sample=False))
+        pred_state_delta = self.agent.get_prediction(test_state, test_action, sample=False, scale=True, delta=True, use_ensemble=False)
 
         error = abs(pred_state_delta - test_state_delta)
         print("\nERROR MEAN:", error.mean(axis=0))
@@ -397,10 +391,8 @@ class RealMPC():
 
         return action
 
-    def get_goal(self, random=True):
+    def get_goal(self):
         t_rel = (self.time_elapsed % self.lap_time) / self.lap_time
-        # if not self.started and random:
-        #     t_rel += np.random.uniform(0, 0.01)
 
         if t_rel < 0.5:
             theta = t_rel * 2 * 2 * np.pi
@@ -408,15 +400,6 @@ class RealMPC():
         else:
             theta = np.pi - ((t_rel - 0.5) * 2 * 2 * np.pi)
             center = self.back_circle_center
-        # if t_rel < 0.25:
-        #     theta = 2 * np.pi * t_rel / 0.5
-        #     center = self.back_circle_center
-        # elif 0.25 <= t_rel < 0.75:
-        #     theta = -2 * np.pi * (t_rel - 0.25) / 0.5
-        #     center = self.front_circle_center
-        # else:
-        #     theta = 2 * np.pi * (t_rel - 0.5) / 0.5
-        #     center = self.back_circle_center
 
         theta -= np.pi / 2
         goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
