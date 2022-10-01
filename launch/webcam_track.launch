@@ -1,7 +1,7 @@
 <launch>
 
 	<arg name="video_device"		default="/dev/video0" />
-	
+
 	<node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen" >
 	    <param name="video_device" value="$(arg video_device)" />
 	    <!-- <param name="image_width" value="640" /> -->
@@ -37,5 +37,18 @@
 		<remap from="camera_info"   to="$(arg cam_info_topic)" />
 	</node>
 	<node name="rviz" type="rviz" pkg="rviz" args="-d $(find ros_stuff)/rviz/default.rviz">
+	</node>
+
+
+	<arg name="robot_id"         	default="1" />
+    <arg name="object_id" 		 	default="-1" />
+	<arg name="base_id"          	default="3" />
+    <arg name="corner_id" 	     	default="4" />
+
+	<node name="state_publisher" pkg="ros_stuff" type="state_publisher.py" output="screen">
+		<param name="robot_id"           type="int" value="$(arg robot_id)" />
+		<param name="object_id"          type="int" value="$(arg object_id)" />
+		<param name="base_id"       	 type="int" value="$(arg base_id)" />
+		<param name="corner_id"          type="int" value="$(arg corner_id)" />
 	</node>
 </launch>

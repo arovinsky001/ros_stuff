@@ -11,7 +11,7 @@ from real_mpc_dynamics import *
 from replay_buffer import ReplayBuffer
 from state_subscriber import StateSubscriber
 
-from ros_stuff.msg import RobotCmd
+from ros_stuff.msg import RobotCmd, ProcessedStates
 from ros_stuff.srv import CommandAction
 
 from ar_track_alvar_msgs.msg import AlvarMarkers
@@ -37,8 +37,11 @@ class RealMPC():
         # AR tag ids for state lookup
         self.robot_id = robot_id
         self.object_id = object_id
-        self.base_id = 3
-        self.corner_id = 4
+
+        # states
+        self.robot_state = np.zeros(3)
+        self.object_state = np.zeros(3)
+        self.corner_state = np.zeros(3)
 
         # MPC params
         self.mpc_steps = mpc_steps
@@ -64,7 +67,6 @@ class RealMPC():
         self.n_wait_updates = 1
         self.n_clip = 3
         self.max_lag_states = 3
-        # self.flat_lim = 0.6
 
         # misc
         self.n_rollouts = n_rollouts
@@ -84,20 +86,15 @@ class RealMPC():
 
         rospy.init_node("laptop_client_mpc")
 
+        print("waiting for /processed_state topic from state publisher")
+        rospy.Subscriber("/processed_state", ProcessedStates, self.update_state, queue_size=1)
+        print("subscribed to /processed_state")
+
         robot_id = self.robot_id if False else 1
         print(f"waiting for robot {robot_id} service")
         rospy.wait_for_service(f"/kami{robot_id}/server")
         self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
         print("connected to robot service")
-
-        # state subscriber handles all tracking and sets states, we never set states in this file
-        self.state_subscriber = StateSubscriber(self.base_id, robot=self.robot_id,
-                                                object=self.object_id, corner=self.corner_id)
-        self.robot_state = self.state_subscriber.states[self.robot_id]          # (x, y, yaw)
-        self.object_state = self.state_subscriber.states[self.object_id]        # (x, y, yaw)
-        self.corner_state = self.state_subscriber.states[self.corner_id]        # (x, y, yaw)
-        self.n_updates = self.state_subscriber.n_updates
-        self.n_full_updates = self.state_subscriber.n_full_updates
 
         self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
         if not os.path.exists(self.yaw_offset_path) or calibrate:
@@ -259,6 +256,12 @@ class RealMPC():
         self.front_circle_center = front_circle_center_rel * corner_range + self.front_left_corner
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
+    def update_state(self, msg):
+        rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
+        self.robot_state = np.array([rs.x, rs.y, rs.yaw])
+        self.object_state = np.array([os.x, os.y, os.yaw])
+        self.corner_state = np.array([cs.x, cs.y, cs.yaw])
+
     def record_losses(self):
         if self.started:
             dist_loss, heading_loss, perp_loss = self.agent.compute_losses(
@@ -351,25 +354,10 @@ class RealMPC():
         return True
 
     def get_state(self):
-        names = ["robot", "object"] if self.use_object else ["robot"]
-        states = self.state_subscriber.get_states(names, n_avg=self.n_avg_states)
-
         if self.use_object:
-            robot_state, object_state = states
+            return np.concatenate((self.robot_state, self.object_state), axis=0)
         else:
-            robot_state = states
-
-        if hasattr(self, "yaw_offsets"):
-            robot_state[2] += self.yaw_offsets[self.robot_id]
-            if self.use_object:
-                object_state[2] += self.yaw_offsets[self.object_id]
-
-        if self.use_object:
-            current_state = np.concatenate((robot_state, object_state), axis=0)
-        else:
-            current_state = robot_state
-
-        return current_state
+            return self.robot_state
 
     def get_take_action(self, state):
         goal = self.get_goal()
