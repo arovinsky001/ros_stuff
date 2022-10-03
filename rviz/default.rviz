@@ -56,7 +56,7 @@ Visualization Manager:
       Value: true
     - Class: rviz/Image
       Enabled: true
-      Image Topic: /usb_cam/image_rect_color
+      Image Topic: /usb_cam/image_raw
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -71,8 +71,6 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        ar_marker_1:
-          Value: true
         ar_marker_3:
           Value: true
         ar_marker_4:
@@ -87,8 +85,6 @@ Visualization Manager:
       Show Names: true
       Tree:
         usb_cam:
-          ar_marker_1:
-            {}
           ar_marker_3:
             {}
           ar_marker_4:
@@ -139,9 +135,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4453977942466736
+      Pitch: 0.010397840291261673
       Target Frame: <Fixed Frame>
-      Yaw: 0.7553977966308594
+      Yaw: 0.23539787530899048
     Saved: ~
 Window Geometry:
   Displays:

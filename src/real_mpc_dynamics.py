@@ -215,9 +215,10 @@ class MPCAgent:
                    dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5):
         original_state = state
 
-        gamma = 35000
+        gamma = 50000 # 35000
         alpha = 0.9
-        n_best_losses = 20
+        beta = 0.6
+        n_best_losses = 30
         action_dim = action_range.shape[-1]
         action_trajectory_dim = n_steps * action_dim
         all_actions = np.random.uniform(*action_range, size=(n_samples, n_steps, action_dim))
@@ -228,8 +229,15 @@ class MPCAgent:
 
         for k in range(mpc_refine_iters):
             state = np.tile(original_state, (n_samples, 1))
-            if k > 1:
-                all_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
+            if k > 0:
+                if mpc_softmax:
+                    u = np.random.randn(n_samples, action_trajectory_dim).reshape(n_samples, n_steps, action_dim) * 0.2
+                    n = u
+                    for i in range(1, n_steps):
+                        n[:, i] = beta * u[:, i] + (1 - beta) * n[:, i-1]
+                    all_actions = (trajectory_mean + n.reshape(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
+                else:
+                    all_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
                 all_actions = np.clip(all_actions, *action_range)
 
             for i in range(n_steps):
@@ -252,7 +260,7 @@ class MPCAgent:
 
             trajectory_losses = all_losses.sum(axis=1)
             if mpc_softmax:
-                print("softmax")
+                # print("softmax")
                 trajectory_losses -= trajectory_losses.min()
                 trajectory_losses = trajectory_losses / trajectory_losses.sum()
 
@@ -260,7 +268,7 @@ class MPCAgent:
                 action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
 
                 if mpc_softmax:
-                    print("SOFTMAX")
+                    # print("SOFTMAX")
                     weights = np.exp(gamma * -trajectory_losses)
                     weights_sum = weights.sum()
                     weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)

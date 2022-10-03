@@ -6,7 +6,7 @@ import tf2_ros
 import tf2_geometry_msgs
 
 from ar_track_alvar_msgs.msg import AlvarMarkers
-from std_msgs.msg import String
+from std_msgs.msg import String, Header
 from ros_stuff.msg import SingleState, ProcessedStates
 
 from tf.transformations import euler_from_quaternion
@@ -85,6 +85,9 @@ class StatePublisher:
         rs.x, rs.y, rs.yaw = self.id_to_state[self.name_to_id["robot"]]
         os.x, os.y, os.yaw = self.id_to_state[self.name_to_id["object"]]
         cs.x, cs.y, cs.yaw = self.id_to_state[self.name_to_id["corner"]]
+
+        pub_msg.header = Header()
+        pub_msg.header.stamp = rospy.Time.now()
 
         self.publisher.publish(pub_msg)
 

@@ -18,11 +18,13 @@ SEED = 0
 import torch; torch.manual_seed(SEED)
 np.random.seed(SEED)
 
+AGENT_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/agent.pkl"
 
 class RealMPC():
     def __init__(self, robot_id, object_id, mpc_steps, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
                  new_buffer, pretrain, robot_goals, scale, mpc_softmax, save_freq, online, mpc_refine_iters,
-                 pretrain_samples, random_steps, rate):
+                 pretrain_samples, random_steps, rate, use_all_data, debug, robot_state, object_state, corner_state,
+                 state_timestamp, save_agent, load_agent):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -36,6 +38,11 @@ class RealMPC():
 
         # states
         self.robot_state = self.object_state = self.corner_state = None
+
+        self.robot_state = robot_state
+        self.object_state = object_state
+        self.corner_state = corner_state
+        self.state_timestamp = state_timestamp
 
         # MPC params
         self.mpc_steps = mpc_steps
@@ -68,6 +75,9 @@ class RealMPC():
         self.robot_goals = robot_goals
         self.scale = scale
         self.pretrain = pretrain
+        self.use_all_data = use_all_data
+        self.debug = debug
+        self.last_action_time = 0.
 
         if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
             with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
@@ -76,17 +86,18 @@ class RealMPC():
             state_dim = 6 if self.use_object else 3
             self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=state_dim, action_dim=2)
 
-        rospy.init_node("laptop_client_mpc")
+        # rospy.init_node("laptop_client_mpc")
 
-        print("waiting for /processed_state topic from state publisher")
-        rospy.Subscriber("/processed_state", ProcessedStates, self.update_state, queue_size=1)
-        print("subscribed to /processed_state")
+        # print("waiting for /processed_state topic from state publisher")
+        # rospy.Subscriber("/processed_state", ProcessedStates, self.update_state, queue_size=1)
+        # print("subscribed to /processed_state")
 
-        robot_id = self.robot_id if False else 1
-        print(f"waiting for robot {robot_id} service")
-        rospy.wait_for_service(f"/kami{robot_id}/server")
-        self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
-        print("connected to robot service")
+        if not self.debug:
+            robot_id = self.robot_id if False else 1
+            print(f"waiting for robot {robot_id} service")
+            rospy.wait_for_service(f"/kami{robot_id}/server")
+            self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
+            print("connected to robot service")
 
         self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
         if not os.path.exists(self.yaw_offset_path) or calibrate:
@@ -128,11 +139,17 @@ class RealMPC():
         self.laps = 0
         self.n_prints = 0
 
-        self.agent = MPCAgent(seed=SEED, dist=True, scale=self.scale, hidden_dim=250, hidden_depth=2,
+        if load_agent:
+            with open(AGENT_PATH, "rb") as f:
+                self.agent = pkl.load(f)
+        else:
+            self.agent = MPCAgent(seed=SEED, dist=True, scale=self.scale, hidden_dim=250, hidden_depth=2,
                               lr=0.001, dropout=0.0, ensemble=1, use_object=self.use_object)
-
-        if pretrain:
-            self.train_model()
+            if pretrain:
+                self.train_model()
+                if save_agent:
+                    with open(AGENT_PATH, "wb") as f:
+                        pkl.dump(self.agent, f)
 
         # for g in self.agent.models[0].optimizer.param_groups:
         #     g['lr'] = 3e-4
@@ -177,7 +194,7 @@ class RealMPC():
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=True)
+                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=self.use_all_data)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -196,7 +213,7 @@ class RealMPC():
         test_state_delta = dtu.dcn(state_delta[test_idx])
 
         # pred_state_delta = dtu.dcn(self.agent.models[0](test_state, test_action, sample=False))
-        pred_state_delta = self.agent.get_prediction(test_state, test_action, sample=False, scale=True, delta=True, use_ensemble=False)
+        pred_state_delta = self.agent.get_prediction(test_state, test_action, sample=False, delta=True, use_ensemble=False)
 
         error = abs(pred_state_delta - test_state_delta)
         print("\nERROR MEAN:", error.mean(axis=0))
@@ -232,21 +249,14 @@ class RealMPC():
         plt.show()
 
     def define_goal_trajectory(self):
-        while self.corner_state is None:
-            rospy.sleep(0.01)
+        rospy.sleep(0.2)        # wait for states to be published and set
 
-        back_circle_center_rel = np.array([0.5, 0.65])
-        front_circle_center_rel = np.array([0.5, 0.35])
+        back_circle_center_rel = np.array([0.65, 0.5])
+        front_circle_center_rel = np.array([0.35, 0.5])
 
         self.back_circle_center = back_circle_center_rel * self.corner_state[:2]
         self.front_circle_center = front_circle_center_rel * self.corner_state[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
-
-    def update_state(self, msg):
-        rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
-        self.robot_state = np.array([rs.x, rs.y, rs.yaw])
-        self.object_state = np.array([os.x, os.y, os.yaw])
-        self.corner_state = np.array([cs.x, cs.y, cs.yaw])
 
     def record_losses(self):
         if self.started:
@@ -271,9 +281,10 @@ class RealMPC():
 
     def run(self):
         self.first_plot = True
-        self.init_goal = self.get_goal(random=False)
+        self.init_goal = self.get_goal()
 
         r = rospy.Rate(self.rate)
+        # t = rospy.get_time()
         while not rospy.is_shutdown():
             if self.started:
                 self.record_plot_states()
@@ -289,6 +300,12 @@ class RealMPC():
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
+            # while (rospy.get_time() - t < 1 / self.rate):
+            #     # print("sleeping")
+            #     # rospy.sleep(0.01)
+            #     x = 5
+
+            # t = rospy.get_time()
             r.sleep()
 
     def plot_states_and_goals(self):
@@ -328,7 +345,22 @@ class RealMPC():
         self.steps += 1
         return True
 
+    # def update_state(self, msg):
+    #     rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
+    #     self.robot_state = np.array([rs.x, rs.y, rs.yaw])
+    #     self.object_state = np.array([os.x, os.y, os.yaw])
+    #     self.corner_state = np.array([cs.x, cs.y, cs.yaw])
+
+    #     secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
+    #     self.state_timestamp = secs + nsecs / 1e9
+    #     # print("updated")
+
     def get_state(self):
+        # print(self.state_timestamp - self.last_action_time)
+        # while self.state_timestamp - self.last_action_time < self.duration * 0.3:
+        #     print("sleeping")
+        #     rospy.sleep(0.01)
+
         if self.use_object:
             return np.concatenate((self.robot_state, self.object_state), axis=0)
         else:
@@ -359,7 +391,8 @@ class RealMPC():
         action_req.right_pwm = action[1]
         action_req.duration = self.duration
 
-        self.service_proxy(action_req, f"kami{self.robot_id}")
+        if not self.debug:
+            self.service_proxy(action_req, f"kami{self.robot_id}")
 
         time = rospy.get_time()
         bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
@@ -388,6 +421,7 @@ class RealMPC():
         print("/////////////////////////////////////////////////")
 
         self.last_goal = goal.copy() if self.started else None
+        self.last_action_time = rospy.get_time()
 
         return action
 
@@ -401,7 +435,7 @@ class RealMPC():
             theta = np.pi - ((t_rel - 0.5) * 2 * 2 * np.pi)
             center = self.back_circle_center
 
-        theta -= np.pi / 2
+        # theta -= np.pi / 2
         goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
         return np.block([goal, 0.0])
 
@@ -458,6 +492,16 @@ class RealMPC():
                     states, actions, next_states = self.replay_buffer.sample(200)
                     model.update(states, actions, next_states)
 
+def update_state(msg):
+    rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
+    robot_state[:] = np.array([rs.x, rs.y, rs.yaw])
+    object_state[:] = np.array([os.x, os.y, os.yaw])
+    corner_state[:] = np.array([cs.x, cs.y, cs.yaw])
+
+    secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
+    state_timestamp[:] = secs + nsecs / 1e9
+    # print("updated")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Do MPC.')
@@ -481,11 +525,27 @@ if __name__ == '__main__':
     parser.add_argument('-pretrain_samples', type=int, default=500)
     parser.add_argument('-random_steps', type=int, default=500)
     parser.add_argument('-rate', type=float, default=1.)
+    parser.add_argument('-use_all_data', action='store_true')
+    parser.add_argument('-debug', action='store_true')
+    parser.add_argument('-save_agent', action='store_true')
+    parser.add_argument('-load_agent', action='store_true')
 
     args = parser.parse_args()
+
+    robot_state = np.empty(3)
+    object_state = np.empty(3)
+    corner_state = np.empty(3)
+    state_timestamp = np.empty(1)
+
+    rospy.init_node("laptop_client_mpc")
+
+    print("waiting for /processed_state topic from state publisher")
+    rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
+    print("subscribed to /processed_state")
 
     r = RealMPC(args.robot_id, args.object_id, args.mpc_steps, args.mpc_samples, args.n_rollouts, args.tolerance,
                 args.lap_time, args.calibrate, args.plot, args.new_buffer, args.pretrain, args.robot_goals, args.scale,
                 args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
-                args.random_steps, args.rate)
+                args.random_steps, args.rate, args.use_all_data, args.debug, robot_state, object_state, corner_state,
+                state_timestamp, args.save_agent, args.load_agent)
     r.run()
