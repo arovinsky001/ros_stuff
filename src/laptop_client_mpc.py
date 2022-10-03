@@ -103,7 +103,6 @@ class RealMPC():
         # self.norm_weight = 0.0
         # self.dist_bonus_weight = 10.
         # self.sep_weight = 0.0
-        # self.discrim_weight = 0.
         # self.heading_diff_weight = 0.0
 
         self.perp_weight = 0.
@@ -112,7 +111,6 @@ class RealMPC():
         self.norm_weight = 0.0
         self.dist_bonus_weight = 0.
         self.sep_weight = 0.
-        self.discrim_weight = 0.0
         self.heading_diff_weight = 0.0
 
         self.plot_robot_states = []
@@ -176,19 +174,14 @@ class RealMPC():
 
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
-        training_losses, test_losses, discrim_training_losses, discrim_test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=1000, discrim_epochs=5, batch_size=1000, use_all_data=True)
+        training_losses, test_losses, test_idx = self.agent.train(
+                states, actions, next_states, set_scalers=True, epochs=1000, batch_size=1000, use_all_data=True)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
-        discrim_training_losses = np.array(discrim_training_losses).squeeze()
-        discrim_test_losses = np.array(discrim_test_losses).squeeze()
 
         print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
         print("MIN TEST LOSS:", test_losses.min())
-
-        print("\nMIN DISCRIM TEST LOSS EPOCH:", discrim_test_losses.argmin())
-        print("MIN DISCRIM TEST LOSS:", discrim_test_losses.min())
 
         state_delta = self.agent.dtu.state_delta_xysc(states, next_states)
 
@@ -211,16 +204,12 @@ class RealMPC():
         fig, axes = plt.subplots(1, 4)
         axes[0].plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
         axes[1].plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
-        axes[2].plot(np.arange(len(discrim_training_losses)), discrim_training_losses, label="Discriminator Training Loss")
-        axes[3].plot(np.arange(len(discrim_test_losses)), discrim_test_losses, label="Discriminator Test Loss")
 
         axes[0].set_yscale('log')
         axes[1].set_yscale('log')
 
         axes[0].set_title('Training Loss')
         axes[1].set_title('Test Loss')
-        axes[2].set_title('Discriminator Training Loss')
-        axes[3].set_title('Discriminator Test Loss')
 
         for ax in axes:
             ax.grid()
@@ -345,9 +334,9 @@ class RealMPC():
                                            n_samples=self.mpc_samples, perp_weight=self.perp_weight,
                                            heading_weight=self.heading_weight, dist_weight=self.dist_weight,
                                            norm_weight=self.norm_weight, sep_weight=self.sep_weight if self.started else 0.,
-                                           discrim_weight=self.discrim_weight, heading_diff_weight=self.heading_diff_weight,
-                                           dist_bonus_weight=self.dist_bonus_weight, robot_goals=self.robot_goals,
-                                           mpc_softmax=self.mpc_softmax, mpc_refine_iters=self.mpc_refine_iters)
+                                           heading_diff_weight=self.heading_diff_weight, dist_bonus_weight=self.dist_bonus_weight,
+                                           robot_goals=self.robot_goals, mpc_softmax=self.mpc_softmax,
+                                           mpc_refine_iters=self.mpc_refine_iters)
             self.time_elapsed += self.duration if self.started else 0
         else:
             print("TAKING RANDOM ACTION")
