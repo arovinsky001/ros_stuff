@@ -86,12 +86,6 @@ class RealMPC():
             state_dim = 6 if self.use_object else 3
             self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=state_dim, action_dim=2)
 
-        # rospy.init_node("laptop_client_mpc")
-
-        # print("waiting for /processed_state topic from state publisher")
-        # rospy.Subscriber("/processed_state", ProcessedStates, self.update_state, queue_size=1)
-        # print("subscribed to /processed_state")
-
         if not self.debug:
             robot_id = self.robot_id if False else 1
             print(f"waiting for robot {robot_id} service")
@@ -178,17 +172,6 @@ class RealMPC():
         np.save(self.yaw_offset_path, yaw_offsets)
 
     def train_model(self):
-        idx = self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx
-
-        # states = self.replay_buffer.states[:idx-1]
-        # actions = self.replay_buffer.actions[:idx-1]
-        # next_states = self.replay_buffer.states[1:idx]
-
-        # random_idx = np.random.permutation(len(states))[:self.pretrain_samples]
-        # states = states[random_idx]
-        # actions = actions[random_idx]
-        # next_states = next_states[random_idx]
-
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, test_idx = self.agent.train(
@@ -204,8 +187,6 @@ class RealMPC():
 
         test_state, test_action = states[test_idx], actions[test_idx]
         test_state_delta = dtu.dcn(state_delta[test_idx])
-
-        # pred_state_delta = dtu.dcn(self.agent.models[0](test_state, test_action, sample=False))
         pred_state_delta = self.agent.get_prediction(test_state, test_action, sample=False, delta=True, use_ensemble=False)
 
         error = abs(pred_state_delta - test_state_delta)
@@ -273,7 +254,6 @@ class RealMPC():
         self.init_goal = self.get_goal()
 
         r = rospy.Rate(self.rate)
-        # t = rospy.get_time()
         while not rospy.is_shutdown():
             if self.started:
                 self.record_plot_states()
@@ -289,12 +269,6 @@ class RealMPC():
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
-            # while (rospy.get_time() - t < 1 / self.rate):
-            #     # print("sleeping")
-            #     # rospy.sleep(0.01)
-            #     x = 5
-
-            # t = rospy.get_time()
             r.sleep()
 
     def plot_states_and_goals(self):
@@ -305,6 +279,8 @@ class RealMPC():
         plt.plot(plot_robot_states[:, 0] * -1, plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
         # plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
         if self.first_plot:
+            plt.xlim((0, self.corner_state[0]))
+            plt.ylim((0, self.corner_state[1]))
             plt.legend()
             plt.ion()
             plt.show()
@@ -334,21 +310,10 @@ class RealMPC():
         self.steps += 1
         return True
 
-    # def update_state(self, msg):
-    #     rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
-    #     self.robot_state = np.array([rs.x, rs.y, rs.yaw])
-    #     self.object_state = np.array([os.x, os.y, os.yaw])
-    #     self.corner_state = np.array([cs.x, cs.y, cs.yaw])
-
-    #     secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
-    #     self.state_timestamp = secs + nsecs / 1e9
-    #     # print("updated")
-
     def get_state(self):
-        # print(self.state_timestamp - self.last_action_time)
+        # # make sure some time has passed since the kamigami returned to ensure the robot is still
         # while self.state_timestamp - self.last_action_time < self.duration * 0.3:
-        #     print("sleeping")
-        #     rospy.sleep(0.01)
+        #     rospy.sleep(0.005)
 
         if self.use_object:
             return np.concatenate((self.robot_state, self.object_state), axis=0)
@@ -489,7 +454,6 @@ def update_state(msg):
 
     secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
     state_timestamp[:] = secs + nsecs / 1e9
-    # print("updated")
 
 
 if __name__ == '__main__':

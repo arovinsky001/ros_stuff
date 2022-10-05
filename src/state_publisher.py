@@ -6,7 +6,7 @@ import tf2_ros
 import tf2_geometry_msgs
 
 from ar_track_alvar_msgs.msg import AlvarMarkers
-from std_msgs.msg import String, Header
+from std_msgs.msg import Header
 from ros_stuff.msg import SingleState, ProcessedStates
 
 from tf.transformations import euler_from_quaternion
@@ -28,6 +28,8 @@ class StatePublisher:
                            "corner": corner_id}
 
         self.id_to_state = {id: np.zeros(3) for id in self.name_to_id.values()}
+        # compute velocity based on most recent 3 states with timestamps
+        self.id_to_vstate = {id: np.zeros((3, 4)) for id in self.name_to_id.values()}
 
         rospy.init_node("state_publisher")
 
@@ -52,6 +54,7 @@ class StatePublisher:
         for marker in msg.markers:
             if marker.id in self.id_to_state and marker.id != self.base_id:
                 state = self.id_to_state[marker.id]
+                vstate = self.id_to_vstate[marker.id]
             else:
                 continue
 
@@ -77,6 +80,10 @@ class StatePublisher:
             state[1] = p.y
             state[2] = yaw
 
+            vstate[1:] = vstate[:-1]
+            secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
+            vstate[0] = np.concatenate((state, secs + nsecs / 1e9))
+
         pub_msg = ProcessedStates()
         rs = pub_msg.robot_state = SingleState()
         os = pub_msg.object_state = SingleState()
@@ -86,10 +93,32 @@ class StatePublisher:
         os.x, os.y, os.yaw = self.id_to_state[self.name_to_id["object"]]
         cs.x, cs.y, cs.yaw = self.id_to_state[self.name_to_id["corner"]]
 
+        robot_vel, object_vel = self.compute_vel_from_vstate()
+        rs.x_vel, rs.y_vel, rs.yaw_vel = robot_vel
+        os.x_vel, os.y_vel, os.yaw_vel = object_vel
+
         pub_msg.header = Header()
         pub_msg.header.stamp = rospy.Time.now()
 
         self.publisher.publish(pub_msg)
+
+    def compute_vel_from_vstate(self):
+        velocities = []
+        for name in ["robot", "object"]:
+            vstate = self.id_to_vstate[self.name_to_id[name]]
+            v1 = vstate[0] - vstate[1]
+            v2 = vstate[1] - vstate[2]
+
+            # get signed difference for yaw
+            v1[2] = (v1[2] + np.pi) % (2 * np.pi) - np.pi
+            v2[2] = (v2[2] + np.pi) % (2 * np.pi) - np.pi
+
+            # divide by time delta to get velocity
+            v1 = v1[:-1] / v1[-1]
+            v2 = v2[:-1] / v2[-1]
+            velocities.append((v1 + v2) / 2)
+
+        return velocities
 
 
 if __name__ == "__main__":

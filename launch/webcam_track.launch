@@ -26,8 +26,6 @@
 	<!-- Dynamic reconfigure the resizing nodelet -->
 	<node name="$(anon dynparam)" pkg="dynamic_reconfigure" type="dynparam" args="set_from_parameters resize_img">
 		<param name="use_scale" type="int" value="0" />
-		<!-- <param name="width" type="int" value="$(arg image_width)" />
-		<param name="height" type="int" value="$(arg image_height)" /> -->
 		<param name="width" type="int" value="$(arg image_width)" />
 		<param name="height" type="int" value="$(arg image_height)" />
 	</node>
