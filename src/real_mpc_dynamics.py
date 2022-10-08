@@ -18,7 +18,7 @@ device = torch.device("cpu")
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
+    def __init__(self, input_dim, output_dim, dtu=None, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth > 1
         layers = []
@@ -38,7 +38,10 @@ class DynamicsNetwork(nn.Module):
         self.input_scaler = None
         self.output_scaler = None
         self.net.apply(self._init_weights)
-        self.dtu = dtu.DataUtils(use_object=use_object)
+        if dtu is None:
+            self.dtu = dtu.DataUtils(use_object=use_object)
+        else:
+            self.dtu = dtu
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -57,7 +60,10 @@ class DynamicsNetwork(nn.Module):
         input_state = self.dtu.state_to_model_input(state)
         state_action = torch.cat([input_state, action], dim=1).float()
         if self.scale:
-            state_action = self.standardize_input(state_action)
+            try:
+                state_action = self.standardize_input(state_action)
+            except:
+                import pdb;pdb.set_trace()
 
         if self.dist:
             mean = self.net(state_action)
@@ -121,11 +127,25 @@ class DynamicsNetwork(nn.Module):
 
 class MPCAgent:
     def __init__(self, seed=1, hidden_dim=512, hidden_depth=2, lr=7e-4, dropout=0.5, std=0.02,
-                 dist=True, scale=True, ensemble=0, use_object=True):
+                 dist=True, scale=True, ensemble=0, use_object=False, use_velocity=False):
         assert ensemble > 0
-        input_dim = output_dim = 8 if use_object else 4
+        if use_object:
+            if use_velocity:
+                input_dim = 12
+                output_dim = 14
+            else:
+                input_dim = 8
+                output_dim = 8
+        else:
+            if use_velocity:
+                input_dim = 7
+                output_dim = 7
+            else:
+                input_dim = 4
+                output_dim = 4
 
-        self.models = [DynamicsNetwork(input_dim, output_dim, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
+        self.dtu = dtu.DataUtils(use_object=use_object, use_velocity=use_velocity)
+        self.models = [DynamicsNetwork(input_dim, output_dim, dtu=self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
                                 for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
@@ -133,7 +153,7 @@ class MPCAgent:
         self.scale = scale
         self.ensemble = ensemble
         self.use_object = use_object
-        self.dtu = dtu.DataUtils(use_object=use_object)
+
 
     @property
     def model(self):
@@ -141,10 +161,9 @@ class MPCAgent:
 
     def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
                    heading_weight=0.0, dist_weight=1.0, norm_weight=0.0, sep_weight=0.0, heading_diff_weight=0.0,
-                   dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5):
+                   dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5, softmax_gamma=50000):
         original_state = state
 
-        gamma = 50000 # 35000
         alpha = 0.9
         beta = 0.6
         n_best_losses = 30
@@ -171,10 +190,10 @@ class MPCAgent:
 
             for i in range(n_steps):
                 action = all_actions[:, i]
-                state, state_xysc = self.get_prediction(state, action, sample=False, use_ensemble=False, xysc=True)
+                state = self.get_prediction(state, action, sample=False, use_ensemble=False)
 
                 dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss = \
-                        self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals, state_xysc=state_xysc)
+                        self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals)
 
                 dist_bonus = -(dist_loss < 0.2).astype('float')
                 dist_bonus2 = -(dist_loss < 0.1).astype('float')
@@ -198,7 +217,7 @@ class MPCAgent:
 
                 if mpc_softmax:
                     # print("SOFTMAX")
-                    weights = np.exp(gamma * -trajectory_losses)
+                    weights = np.exp(softmax_gamma * -trajectory_losses)
                     weights_sum = weights.sum()
                     weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)
                     # weighted_std =
@@ -213,18 +232,15 @@ class MPCAgent:
                     trajectory_mean = alpha * best_trajectories_mean + (1 - alpha) * trajectory_mean
                     trajectory_std = alpha * best_trajectories_std + (1 - alpha) * trajectory_std
 
-                # normal_action = all_actions[best_losses_idx[0], 0]
-                # set_trace()
                 trajectory_std = np.stack((trajectory_std, np.ones_like(trajectory_std) * 0.02)).max(axis=0)
             else:
                 best_idx = trajectory_losses.argmin()
-                # set_trace()
                 return all_actions[best_idx, 0]
 
-        return trajectory_mean[:action_range.shape[-1]]
-        # return best_trajectories[0, :action_range.shape[-1]]
+        # return trajectory_mean[:action_range.shape[-1]]
+        return action_trajectories[trajectory_losses.argmin()][:action_range.shape[-1]]
 
-    def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False, state_xysc=None):
+    def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False):
         vec_to_goal = (goal - prev_goal)[:2]
         if current:
             state = state[None, :]
@@ -237,13 +253,13 @@ class MPCAgent:
 
         if self.use_object:
             # separation loss
-            robot_state, object_state = state[:, :3], state[:, 3:]
+            robot_state, object_state = state[:, :3], state[:, 3:6]
             object_to_robot_xy = (robot_state - object_state)[:, :2]
             sep_loss = np.linalg.norm(object_to_robot_xy, axis=1)
 
             effective_state = robot_state if robot_goals else object_state
         else:
-            effective_state = state
+            effective_state = state[:, :3]     # ignore velocity
             sep_loss = 0.
 
         x0, y0, current_angle = effective_state.T
@@ -296,15 +312,15 @@ class MPCAgent:
         if self.use_object:
             robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
             heading_diff = (robot_theta + np.pi - object_theta) % (2 * np.pi)
-            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), dim=1).min(axis=1).squeeze()
-            print(f"Robot: {robot_theta}, Object: {object_theta}")
-            print("Object Robot Heading Diff: ", heading_diff_loss)
+            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1).squeeze()
+            # print(f"Robot: {robot_theta}, Object: {object_theta}")
+            # print("Object Robot Heading Diff: ", heading_diff_loss)
         else:
             heading_diff_loss = 0.
 
         return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
 
-    def get_prediction(self, state, action, sample=False, delta=False, use_ensemble=False, model_no=0, xysc=False):
+    def get_prediction(self, state, action, sample=False, delta=False, use_ensemble=False, model_no=0):
         """
         Accepts state [x, y, theta] or [x, y, theta, x, y, theta]
         Returns next_state [x, y, theta] or [x, y, theta, x, y, theta]
@@ -312,8 +328,6 @@ class MPCAgent:
         if use_ensemble:
             state_delta_sum = torch.zeros((len(state), 8 if self.use_object else 4))
             next_state_sum = torch.zeros((len(state), 6 if self.use_object else 3))
-            if xysc:
-                next_state_xysc_sum = torch.zeros((len(state), 8 if self.use_object else 4))
 
             for model in self.models:
                 model.eval()
@@ -323,33 +337,23 @@ class MPCAgent:
 
                 with torch.no_grad():
                     state_delta_model = model(state, action, sample=sample)
-                    next_state_model = self.dtu.compute_next_state(state, state_delta_model, xysc=xysc)
-
-                if xysc:
-                    next_state_model, next_state_model_xysc = next_state_model
-                    next_state_xysc_sum += dtu.dcn(next_state_model)
+                    next_state_model = self.dtu.compute_next_state(state, state_delta_model)
 
                 state_delta_sum += state_delta_model
                 next_state_sum += next_state_model
 
             state_delta_model = state_delta_sum / len(self.models)
             next_state_model = next_state_sum / len(self.models)
-            if xysc:
-                next_state_model_xysc = next_state_xysc_sum / len(self.models)
         else:
             model = self.models[model_no]
             model.eval()
 
             with torch.no_grad():
                 state_delta_model = model(state, action, sample=sample)
-                next_state_model = self.dtu.compute_next_state(state, state_delta_model, xysc=xysc)
+                next_state_model = self.dtu.compute_next_state(state, state_delta_model)
 
         if delta:
             return dtu.dcn(state_delta_model)
-
-        if xysc:
-            next_state_model, next_state_model_xysc = next_state_model
-            return dtu.dcn(next_state_model, next_state_model_xysc)
 
         next_state_model[:, 2] %= 2 * np.pi
         if self.use_object:

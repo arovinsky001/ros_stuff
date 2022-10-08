@@ -27,9 +27,9 @@ class StatePublisher:
                            "base": base_id,
                            "corner": corner_id}
 
+        # compute pos/velocity based on most recent 3 states
         self.id_to_state = {id: np.zeros(3) for id in self.name_to_id.values()}
-        # compute velocity based on most recent 3 states with timestamps
-        self.id_to_vstate = {id: np.zeros((3, 4)) for id in self.name_to_id.values()}
+        self.id_to_past_states_stamped = {id: np.empty((3, 4)) for id in self.name_to_id.values()}
 
         rospy.init_node("state_publisher")
 
@@ -54,7 +54,7 @@ class StatePublisher:
         for marker in msg.markers:
             if marker.id in self.id_to_state and marker.id != self.base_id:
                 state = self.id_to_state[marker.id]
-                vstate = self.id_to_vstate[marker.id]
+                past_states = self.id_to_past_states_stamped[marker.id]
             else:
                 continue
 
@@ -80,20 +80,21 @@ class StatePublisher:
             state[1] = p.y
             state[2] = yaw
 
-            vstate[1:] = vstate[:-1]
+            past_states[1:] = past_states[:-1]
             secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
-            vstate[0] = np.concatenate((state, secs + nsecs / 1e9))
+            past_states[0] = np.append(state, secs + nsecs / 1e9)
 
         pub_msg = ProcessedStates()
         rs = pub_msg.robot_state = SingleState()
         os = pub_msg.object_state = SingleState()
         cs = pub_msg.corner_state = SingleState()
 
-        rs.x, rs.y, rs.yaw = self.id_to_state[self.name_to_id["robot"]]
-        os.x, os.y, os.yaw = self.id_to_state[self.name_to_id["object"]]
-        cs.x, cs.y, cs.yaw = self.id_to_state[self.name_to_id["corner"]]
+        robot_pos, object_pos, corner_pos = self.compute_pos_from_past_states()
+        rs.x, rs.y, rs.yaw = robot_pos
+        os.x, os.y, os.yaw = object_pos
+        cs.x, cs.y, cs.yaw = corner_pos
 
-        robot_vel, object_vel = self.compute_vel_from_vstate()
+        robot_vel, object_vel = self.compute_vel_from_past_states()
         rs.x_vel, rs.y_vel, rs.yaw_vel = robot_vel
         os.x_vel, os.y_vel, os.yaw_vel = object_vel
 
@@ -102,12 +103,26 @@ class StatePublisher:
 
         self.publisher.publish(pub_msg)
 
-    def compute_vel_from_vstate(self):
+    def compute_pos_from_past_states(self):
+        positions = []
+        for name in ["robot", "object", "corner"]:
+            past_states = self.id_to_past_states_stamped[self.name_to_id[name]]
+
+            xy_mean = past_states[:, :2].mean(axis=0)
+
+            sin_yaw, cos_yaw = np.sin(past_states[:, 2]), np.cos(past_states[:, 2])
+            yaw_mean = np.arctan2(sin_yaw.mean(keepdims=True), cos_yaw.mean(keepdims=True)) % (2 * np.pi)
+            pos_mean = np.concatenate((xy_mean, yaw_mean), axis=0)
+            positions.append(pos_mean)
+
+        return positions
+
+    def compute_vel_from_past_states(self):
         velocities = []
         for name in ["robot", "object"]:
-            vstate = self.id_to_vstate[self.name_to_id[name]]
-            v1 = vstate[0] - vstate[1]
-            v2 = vstate[1] - vstate[2]
+            past_states = self.id_to_past_states_stamped[self.name_to_id[name]]
+            v1 = past_states[0] - past_states[1]
+            v2 = past_states[1] - past_states[2]
 
             # get signed difference for yaw
             v1[2] = (v1[2] + np.pi) % (2 * np.pi) - np.pi

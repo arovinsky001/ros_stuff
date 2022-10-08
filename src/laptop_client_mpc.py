@@ -23,8 +23,8 @@ AGENT_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/agent.pkl"
 class RealMPC():
     def __init__(self, robot_id, object_id, mpc_steps, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
                  new_buffer, pretrain, robot_goals, scale, mpc_softmax, save_freq, online, mpc_refine_iters,
-                 pretrain_samples, random_steps, rate, use_all_data, debug, robot_state, object_state, corner_state,
-                 state_timestamp, save_agent, load_agent):
+                 pretrain_samples, random_steps, rate, use_all_data, debug, robot_pos, object_pos, corner_pos,
+                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, use_velocity, train_epochs, mpc_gamma):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -37,28 +37,29 @@ class RealMPC():
         self.object_id = object_id
 
         # states
-        self.robot_state = self.object_state = self.corner_state = None
-
-        self.robot_state = robot_state
-        self.object_state = object_state
-        self.corner_state = corner_state
+        self.robot_pos = robot_pos
+        self.object_pos = object_pos
+        self.corner_pos = corner_pos
+        self.robot_vel = robot_vel
+        self.object_vel = object_vel
         self.state_timestamp = state_timestamp
 
         # MPC params
         self.mpc_steps = mpc_steps
         self.mpc_samples = mpc_samples
         self.mpc_softmax = mpc_softmax
+        self.mpc_gamma = mpc_gamma
         self.mpc_refine_iters = mpc_refine_iters
         self.use_object = (self.object_id >= 0)
 
         # action params
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.2
+        self.duration = 0.3
 
         # online data collection/learning params
-        self.random_steps = 0 if pretrain else random_steps
-        self.gradient_steps = 2
+        self.random_steps = 0 if pretrain or load_agent else random_steps
+        self.gradient_steps = 3
         self.online = online
         self.save_freq = save_freq
         self.pretrain_samples = pretrain_samples
@@ -75,8 +76,12 @@ class RealMPC():
         self.robot_goals = robot_goals
         self.scale = scale
         self.pretrain = pretrain
+        self.save_agent = save_agent
+        self.load_agent = load_agent
         self.use_all_data = use_all_data
         self.debug = debug
+        self.use_velocity = use_velocity
+        self.train_epochs = train_epochs
         self.last_action_time = 0.
 
         if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
@@ -84,13 +89,13 @@ class RealMPC():
                 self.replay_buffer = pkl.load(f)
         else:
             state_dim = 6 if self.use_object else 3
-            self.replay_buffer = ReplayBuffer(capacity=10000, state_dim=state_dim, action_dim=2)
+            state_dim *= 2 if self.use_velocity else 1
+            self.replay_buffer = ReplayBuffer(capacity=100000, state_dim=state_dim, action_dim=2)
 
         if not self.debug:
-            robot_id = self.robot_id if False else 1
-            print(f"waiting for robot {robot_id} service")
-            rospy.wait_for_service(f"/kami{robot_id}/server")
-            self.service_proxy = rospy.ServiceProxy(f"/kami{robot_id}/server", CommandAction)
+            print(f"waiting for robot {self.robot_id} service")
+            rospy.wait_for_service(f"/kami{self.robot_id}/server")
+            self.service_proxy = rospy.ServiceProxy(f"/kami{self.robot_id}/server", CommandAction)
             print("connected to robot service")
 
         self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
@@ -111,7 +116,7 @@ class RealMPC():
         # self.heading_diff_weight = 0.0
 
         self.perp_weight = 0.
-        self.heading_weight = 0.0
+        self.heading_weight = 0.
         self.dist_weight = 1.
         self.norm_weight = 0.0
         self.dist_bonus_weight = 0.
@@ -136,15 +141,9 @@ class RealMPC():
                 self.agent = pkl.load(f)
         else:
             self.agent = MPCAgent(seed=SEED, dist=True, scale=self.scale, hidden_dim=250, hidden_depth=2,
-                              lr=0.001, dropout=0.0, ensemble=1, use_object=self.use_object)
+                              lr=0.001, dropout=0.0, ensemble=1, use_object=self.use_object, use_velocity=args.use_velocity)
             if pretrain:
                 self.train_model()
-                if save_agent:
-                    with open(AGENT_PATH, "wb") as f:
-                        pkl.dump(self.agent, f)
-
-        # for g in self.agent.models[0].optimizer.param_groups:
-        #     g['lr'] = 3e-4
 
         np.set_printoptions(suppress=True)
 
@@ -163,7 +162,7 @@ class RealMPC():
         yaw_offsets[self.robot_id] = true_robot_angle - measured_robot_angle
 
         if self.use_object:
-            object_left_state, object_right_state = left_state[3:], right_state[3:]
+            object_left_state, object_right_state = left_state[3:6], right_state[3:6]
             true_object_vector = (object_left_state - object_right_state)[:2]
             true_object_angle = np.arctan2(true_object_vector[1], true_object_vector[0])
             measured_object_angle = object_left_state[2]
@@ -175,7 +174,11 @@ class RealMPC():
         states, actions, next_states = self.replay_buffer.sample(self.pretrain_samples)
 
         training_losses, test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=1000, batch_size=1000, use_all_data=self.use_all_data)
+                states, actions, next_states, set_scalers=True, epochs=self.train_epochs, batch_size=5000, use_all_data=self.use_all_data)
+
+        if self.save_agent:
+            with open(AGENT_PATH, "wb") as f:
+                pkl.dump(self.agent, f)
 
         training_losses = np.array(training_losses).squeeze()
         test_losses = np.array(test_losses).squeeze()
@@ -218,30 +221,33 @@ class RealMPC():
 
         plt.show()
 
+        for g in self.agent.models[0].optimizer.param_groups:
+            g['lr'] = 1e-4
+
     def define_goal_trajectory(self):
         rospy.sleep(0.2)        # wait for states to be published and set
 
-        back_circle_center_rel = np.array([0.65, 0.5])
-        front_circle_center_rel = np.array([0.35, 0.5])
+        back_circle_center_rel = np.array([0.7, 0.5])
+        front_circle_center_rel = np.array([0.4, 0.5])
 
-        self.back_circle_center = back_circle_center_rel * self.corner_state[:2]
-        self.front_circle_center = front_circle_center_rel * self.corner_state[:2]
+        self.back_circle_center = back_circle_center_rel * self.corner_pos[:2]
+        self.front_circle_center = front_circle_center_rel * self.corner_pos[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
-    def record_losses(self):
-        if self.started:
-            dist_loss, heading_loss, perp_loss = self.agent.compute_losses(
-                self.get_state(), self.last_goal, self.get_goal(),
-                current=True, robot_goals=self.robot_goals
-                )
-            total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight)
+    # def record_losses(self):
+    #     if self.started:
+    #         dist_loss, heading_loss, perp_loss = self.agent.compute_losses(
+    #             self.get_state(), self.last_goal, self.get_goal(),
+    #             current=True, robot_goals=self.robot_goals
+    #             )
+    #         total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight)
 
-            self.stamped_losses[1:] = self.stamped_losses[:-1]
-            self.stamped_losses[0] = [rospy.get_time()] + [i for i in [dist_loss, heading_loss, perp_loss, total_loss]]
+    #         self.stamped_losses[1:] = self.stamped_losses[:-1]
+    #         self.stamped_losses[0] = [rospy.get_time()] + [i for i in [dist_loss, heading_loss, perp_loss, total_loss]]
 
     def record_plot_states(self):
-        robot_state_to_plot = self.robot_state.copy()
-        object_state_to_plot = self.object_state.copy()
+        robot_state_to_plot = self.robot_pos.copy()
+        object_state_to_plot = self.object_pos.copy()
         self.plot_robot_states.append(robot_state_to_plot)
         self.plot_object_states.append(object_state_to_plot)
         self.plot_goals.append(self.last_goal.copy())
@@ -255,32 +261,38 @@ class RealMPC():
 
         r = rospy.Rate(self.rate)
         while not rospy.is_shutdown():
+            t = rospy.get_time()
             if self.started:
                 self.record_plot_states()
-            elif self.dist_to_start() < self.tolerance and (self.pretrain or self.steps >= self.random_steps):
+            elif self.dist_to_start() < self.tolerance and (self.pretrain or self.replay_buffer.full or self.replay_buffer.idx >= self.random_steps):
                 self.started = True
                 self.last_goal = self.get_goal()
                 self.time_elapsed = self.duration / 2
 
-            self.step()
-            self.record_losses()
+            state, action = self.step()
+            # self.record_losses()
 
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
             r.sleep()
+            next_state = self.get_state()
+            self.collect_training_data(state, action, next_state)
+
+            print("TIME:", rospy.get_time() - t)
 
     def plot_states_and_goals(self):
-        plot_goals = np.array(self.plot_goals)
-        plot_robot_states = np.array(self.plot_robot_states)
-        plot_object_states = np.array(self.plot_object_states)
-        plt.plot(plot_goals[:, 0] * -1, plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
-        plt.plot(plot_robot_states[:, 0] * -1, plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
-        # plt.plot(plot_object_states[:, 0] * -1, plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
+        # negative to flip for perspective
+        plot_goals = -np.array(self.plot_goals)
+        plot_robot_states = -np.array(self.plot_robot_states)
+        plot_object_states = -np.array(self.plot_object_states)
+        plt.plot(plot_goals[:, 0], plot_goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+        plt.plot(plot_robot_states[:, 0], plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
+        plt.plot(plot_object_states[:, 0], plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
         if self.first_plot:
-            plt.xlim((0, self.corner_state[0]))
-            plt.ylim((0, self.corner_state[1]))
+            plt.xlim((0, -self.corner_pos[0]))
+            plt.ylim((0, -self.corner_pos[1]))
             plt.legend()
             plt.ion()
             plt.show()
@@ -294,13 +306,11 @@ class RealMPC():
         return np.linalg.norm((state - self.init_goal)[:2])
 
     def step(self):
-        if not self.pretrain and self.steps == self.random_steps:
+        if not self.pretrain and not self.load_agent and self.replay_buffer.idx == self.random_steps and not self.replay_buffer.full:
             self.train_model()
 
         state = self.get_state()
         action = self.get_take_action(state)
-
-        self.collect_training_data(state, action)
 
         if self.online:
             self.update_model_online()
@@ -308,7 +318,7 @@ class RealMPC():
         self.check_rollout_finished()
 
         self.steps += 1
-        return True
+        return state, action
 
     def get_state(self):
         # # make sure some time has passed since the kamigami returned to ensure the robot is still
@@ -316,9 +326,15 @@ class RealMPC():
         #     rospy.sleep(0.005)
 
         if self.use_object:
-            return np.concatenate((self.robot_state, self.object_state), axis=0)
+            if self.use_velocity:
+                return np.concatenate((self.robot_pos, self.object_pos, self.robot_vel, self.object_vel), axis=0)
+            else:
+                return np.concatenate((self.robot_pos, self.object_pos), axis=0)
         else:
-            return self.robot_state
+            if self.use_velocity:
+                return np.concatenate((self.robot_pos, self.robot_vel), axis=0)
+            else:
+                return self.robot_pos
 
     def get_take_action(self, state):
         goal = self.get_goal()
@@ -326,7 +342,7 @@ class RealMPC():
         last_goal = self.last_goal if self.started else state_for_last_goal
         last_goal = state_for_last_goal
 
-        if self.steps >= self.random_steps:
+        if self.replay_buffer.full or self.replay_buffer.idx >= self.random_steps:
             action = self.agent.mpc_action(state, last_goal, goal, self.action_range, n_steps=self.mpc_steps,
                                            n_samples=self.mpc_samples, perp_weight=self.perp_weight,
                                            heading_weight=self.heading_weight, dist_weight=self.dist_weight,
@@ -346,31 +362,41 @@ class RealMPC():
         action_req.duration = self.duration
 
         if not self.debug:
+            print("SENDING ACTION")
             self.service_proxy(action_req, f"kami{self.robot_id}")
 
-        time = rospy.get_time()
-        bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
-        idx = np.argwhere(bool_idx).squeeze().reshape(-1)
+        # time = rospy.get_time()
+        # bool_idx = (self.stamped_losses[:, 0] > time - action_req.duration) & (self.stamped_losses[:, 0] < time)
+        # idx = np.argwhere(bool_idx).squeeze().reshape(-1)
 
         self.n_prints += 1
         print(f"\n\n\n\nNO. {self.n_prints}")
         print("/////////////////////////////////////////////////")
         print("=================================================")
-        print(f"RECORDING {len(idx)} LOSSES\n")
+        # print(f"RECORDING {len(idx)} LOSSES\n")
         print("GOAL:", goal)
         print("STATE:", state)
         print("ACTION:", action)
         print("ACTION NORM:", np.linalg.norm(action) / np.sqrt(2), "\n")
-        if len(idx) != 0:
-            losses_to_record = self.stamped_losses[idx, 1:].squeeze()
-            losses_to_record = losses_to_record[None, :] if len(losses_to_record.shape) == 1 else losses_to_record
-            self.losses = np.append(self.losses, losses_to_record, axis=0)
+        # if len(idx) != 0:
+        #     losses_to_record = self.stamped_losses[idx, 1:].squeeze()
+        #     losses_to_record = losses_to_record[None, :] if len(losses_to_record.shape) == 1 else losses_to_record
+        #     self.losses = np.append(self.losses, losses_to_record, axis=0)
 
-            dist_loss, heading_loss, perp_loss, total_loss = losses_to_record if len(losses_to_record.shape) == 1 else losses_to_record[-1]
-            print("DIST:", dist_loss)
-            print("HEADING:", heading_loss)
-            print("PERP:", perp_loss)
-            print("TOTAL:", total_loss)
+        #     dist_loss, heading_loss, perp_loss, total_loss = losses_to_record if len(losses_to_record.shape) == 1 else losses_to_record[-1]
+        dist_loss, heading_loss, perp_loss = self.agent.compute_losses(
+                self.get_state(), last_goal, goal,
+                current=True, robot_goals=self.robot_goals
+                )
+        total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight)
+        losses_to_record = np.array([[dist_loss, heading_loss, perp_loss, total_loss]])
+        self.losses = np.append(self.losses, losses_to_record, axis=0)
+
+        print("DIST:", dist_loss)
+        print("HEADING:", heading_loss)
+        print("PERP:", perp_loss)
+        print("TOTAL:", total_loss)
+
         print("=================================================")
         print("/////////////////////////////////////////////////")
 
@@ -409,9 +435,14 @@ class RealMPC():
             self.time_elapsed = 0.
             self.started = False
             self.plot_states_and_goals()
+
             plt.savefig("/home/bvanbuskirk/Desktop/lap_plots/Transitions:{}_robot:{}".format(self.replay_buffer.idx, self.robot_goals))
             plt.pause(1.0)
             plt.close()
+
+            self.plot_robot_states = []
+            self.plot_object_states = []
+            self.plot_goals = []
 
         if self.laps == self.n_rollouts:
             self.dump_performance_metrics()
@@ -431,8 +462,8 @@ class RealMPC():
         print("cols: (mean, std, min, max)")
         print("DATA:", data, "\n")
 
-    def collect_training_data(self, state, action):
-        self.replay_buffer.add(state, action)
+    def collect_training_data(self, state, action, next_state):
+        self.replay_buffer.add(state, action, next_state)
 
         if self.replay_buffer.idx % self.save_freq == 0:
             print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx} TRANSITIONS\n")
@@ -440,17 +471,21 @@ class RealMPC():
                 pkl.dump(self.replay_buffer, f)
 
     def update_model_online(self):
-        if (self.replay_buffer.full or self.replay_buffer.idx > 50) and (self.pretrain or (not self.pretrain and self.steps >= self.random_steps)):
+        if (self.replay_buffer.full or self.replay_buffer.idx > self.random_steps):
             for model in self.agent.models:
                 for _ in range(self.gradient_steps):
-                    states, actions, next_states = self.replay_buffer.sample(200)
+                    states, actions, next_states = self.replay_buffer.sample(500)
                     model.update(states, actions, next_states)
 
 def update_state(msg):
     rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
-    robot_state[:] = np.array([rs.x, rs.y, rs.yaw])
-    object_state[:] = np.array([os.x, os.y, os.yaw])
-    corner_state[:] = np.array([cs.x, cs.y, cs.yaw])
+
+    robot_pos[:] = np.array([rs.x, rs.y, rs.yaw])
+    object_pos[:] = np.array([os.x, os.y, os.yaw])
+    corner_pos[:] = np.array([cs.x, cs.y, cs.yaw])
+
+    robot_vel[:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
+    object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
 
     secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
     state_timestamp[:] = secs + nsecs / 1e9
@@ -482,12 +517,19 @@ if __name__ == '__main__':
     parser.add_argument('-debug', action='store_true')
     parser.add_argument('-save_agent', action='store_true')
     parser.add_argument('-load_agent', action='store_true')
+    parser.add_argument('-use_velocity', action='store_true')
+    parser.add_argument('-train_epochs', type=int, default=200)
+    parser.add_argument('-mpc_gamma', type=float, default=50000)
 
     args = parser.parse_args()
 
-    robot_state = np.empty(3)
-    object_state = np.empty(3)
-    corner_state = np.empty(3)
+    pos_dim = 3
+    vel_dim = 3
+    robot_pos = np.empty(pos_dim)
+    object_pos = np.empty(pos_dim)
+    corner_pos = np.empty(pos_dim)
+    robot_vel = np.empty(vel_dim)
+    object_vel = np.empty(vel_dim)
     state_timestamp = np.empty(1)
 
     rospy.init_node("laptop_client_mpc")
@@ -499,6 +541,7 @@ if __name__ == '__main__':
     r = RealMPC(args.robot_id, args.object_id, args.mpc_steps, args.mpc_samples, args.n_rollouts, args.tolerance,
                 args.lap_time, args.calibrate, args.plot, args.new_buffer, args.pretrain, args.robot_goals, args.scale,
                 args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
-                args.random_steps, args.rate, args.use_all_data, args.debug, robot_state, object_state, corner_state,
-                state_timestamp, args.save_agent, args.load_agent)
+                args.random_steps, args.rate, args.use_all_data, args.debug, robot_pos, object_pos, corner_pos,
+                robot_vel, object_vel, state_timestamp, args.save_agent, args.load_agent, args.use_velocity,
+                args.train_epochs, args.mpc_gamma)
     r.run()

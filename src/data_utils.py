@@ -32,8 +32,9 @@ def as_tensor(*args):
 # MODEL INPUT/OUTPUT UTILS
 
 class DataUtils:
-    def __init__(self, use_object=True):
+    def __init__(self, use_object=False, use_velocity=False):
         self.use_object = use_object
+        self.use_velocity = use_velocity
 
     def state_to_xysc(self, state):
         """
@@ -83,6 +84,12 @@ class DataUtils:
         else:
             state_xyt = torch.cat((robot_xy, robot_theta[:, None]), dim=1)
 
+        if self.use_velocity:
+            if self.use_object:
+                state_xyt = torch.cat((state_xyt, state[:, 8:14]), dim=1)
+            else:
+                state_xyt = torch.cat((state_xyt, state[:, 4:7]), dim=1)
+
         return state_xyt
 
     def state_to_model_input(self, state):
@@ -112,6 +119,12 @@ class DataUtils:
             obj_to_robot_xysc = robot_xysc - object_xysc
             full_state = torch.cat((robot_sc, obj_to_robot_xysc), dim=1)
 
+        if self.use_velocity:
+            if self.use_object:
+                full_state = torch.cat((full_state, state[:, 6:]), dim=1)
+            else:
+                full_state = torch.cat((full_state, state[:, 3:]), dim=1)
+
         return full_state
 
     def state_delta_xysc(self, state, next_state):
@@ -126,17 +139,30 @@ class DataUtils:
         state_xysc, next_state_xysc = self.state_to_xysc(state), self.state_to_xysc(next_state)
 
         robot_xysc, robot_next_xysc = state_xysc[:, :4], next_state_xysc[:, :4]
-        robot_state_delta_xysc = state_delta_xysc = robot_next_xysc - robot_xysc
+        robot_state_delta_xysc = state_delta_xysc = state_delta = robot_next_xysc - robot_xysc
 
         if self.use_object:
             object_xysc, object_next_xysc = state_xysc[:, 4:], next_state_xysc[:, 4:]
             object_state_delta_xysc = object_next_xysc - object_xysc
 
-            state_delta_xysc = torch.cat((robot_state_delta_xysc, object_state_delta_xysc), dim=1)
+            state_delta_xysc = state_delta = torch.cat((robot_state_delta_xysc, object_state_delta_xysc), dim=1)
 
-        return state_delta_xysc
+        if self.use_velocity:
+            if self.use_object:
+                robot_vel, robot_next_vel = state[:, 6:9], next_state[:, 6:9]
+                object_vel, object_next_vel = state[:, 9:12], next_state[:, 9:12]
 
-    def compute_next_state(self, state, state_delta, xysc=False):
+                robot_vel_delta = robot_next_vel - robot_vel
+                object_vel_delta = object_next_vel - object_vel
+                state_delta = torch.cat((state_delta_xysc, robot_vel_delta, object_vel_delta), dim=1)
+            else:
+                robot_vel, robot_next_vel = state[:, 3:6], next_state[:, 3:6]
+                robot_vel_delta = robot_next_vel - robot_vel
+                state_delta = torch.cat((state_delta_xysc, robot_vel_delta), dim=1)
+
+        return state_delta
+
+    def compute_next_state(self, state, state_delta):
         """
         Inputs:
             if use_object:
@@ -151,11 +177,19 @@ class DataUtils:
             else:
                 next_state = [x, y, theta]
         """
+        state, state_delta = as_tensor(state, state_delta)
         state_xysc = self.state_to_xysc(state)
-        next_state_xysc = state_xysc + state_delta
-        next_state = self.state_from_xysc(next_state_xysc)
 
-        if xysc:
-            return next_state, next_state_xysc
+        if self.use_velocity:
+            if self.use_object:
+                state_xysc_vel = torch.cat((state_xysc, state[:, 6:12]), dim=1)
+            else:
+                state_xysc_vel = torch.cat((state_xysc, state[:, 3:6]), dim=1)
+
+            next_state_xysc_vel = state_xysc_vel + state_delta
+            next_state = self.state_from_xysc(next_state_xysc_vel)
         else:
-            return next_state
+            next_state_xysc = state_xysc + state_delta
+            next_state = self.state_from_xysc(next_state_xysc)
+
+        return next_state
