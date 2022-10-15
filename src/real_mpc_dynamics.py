@@ -60,10 +60,7 @@ class DynamicsNetwork(nn.Module):
         input_state = self.dtu.state_to_model_input(state)
         state_action = torch.cat([input_state, action], dim=1).float()
         if self.scale:
-            try:
-                state_action = self.standardize_input(state_action)
-            except:
-                import pdb;pdb.set_trace()
+            state_action = self.standardize_input(state_action)
 
         if self.dist:
             mean = self.net(state_action)
@@ -89,7 +86,6 @@ class DynamicsNetwork(nn.Module):
         if self.dist:
             if self.scale:
                 state_delta = self.standardize_output(state_delta)
-
             dist = self(state, action, return_dist=True)
             loss = -dist.log_prob(state_delta).mean()
         else:
@@ -165,7 +161,7 @@ class MPCAgent:
         original_state = state
 
         alpha = 0.9
-        beta = 0.6
+        beta = 0.7
         n_best_losses = 30
         action_dim = action_range.shape[-1]
         action_trajectory_dim = n_steps * action_dim
@@ -179,7 +175,7 @@ class MPCAgent:
             state = np.tile(original_state, (n_samples, 1))
             if k > 0:
                 if mpc_softmax:
-                    u = np.random.randn(n_samples, action_trajectory_dim).reshape(n_samples, n_steps, action_dim) * 0.2
+                    u = np.random.randn(n_samples, action_trajectory_dim).reshape(n_samples, n_steps, action_dim) * 0.3
                     n = u
                     for i in range(1, n_steps):
                         n[:, i] = beta * u[:, i] + (1 - beta) * n[:, i-1]
@@ -195,13 +191,16 @@ class MPCAgent:
                 dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss = \
                         self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals)
 
-                dist_bonus = -(dist_loss < 0.2).astype('float')
-                dist_bonus2 = -(dist_loss < 0.1).astype('float')
-                dist_bonus3 = -(dist_loss < 0.04).astype('float')
+                dist_bonus1 = -(dist_loss < 0.08).astype('float')
+                dist_bonus2 = -(dist_loss < 0.04).astype('float')
+                dist_bonus3 = -(dist_loss < 0.01).astype('float')
                 # normalize appropriate losses and compute total loss
+                heading_loss = heading_loss * (dist_loss < 0.04).astype('float')
                 all_losses[:, i] = (dist_weight + perp_weight * perp_loss + norm_weight * norm_loss + heading_weight * heading_loss
                                     + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss \
-                                    + 0 * (dist_bonus + 10 * dist_bonus2 + 100 * dist_bonus3)
+                                    + 0 * (dist_bonus1 + 10 * dist_bonus2 + 100 * dist_bonus3)
+                # all_losses[:, i] = dist_weight * dist_loss + perp_weight * perp_loss \
+                #                         + dist_bonus1 + 2 * dist_bonus2 + 5 * dist_bonus3
 
             # trajectory_losses = all_losses.sum(axis=1)
             # trajectory_losses = trajectory_losses / trajectory_losses.sum()
@@ -210,7 +209,7 @@ class MPCAgent:
             if mpc_softmax:
                 # print("softmax")
                 trajectory_losses -= trajectory_losses.min()
-                trajectory_losses = trajectory_losses / trajectory_losses.sum()
+                trajectory_losses = trajectory_losses / trajectory_losses.max()
 
             if mpc_refine_iters > 1:
                 action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
@@ -237,8 +236,11 @@ class MPCAgent:
                 best_idx = trajectory_losses.argmin()
                 return all_actions[best_idx, 0]
 
-        # return trajectory_mean[:action_range.shape[-1]]
-        return action_trajectories[trajectory_losses.argmin()][:action_range.shape[-1]]
+        # if original_state[0] > 1.3 and original_state[1] < 0.37:
+        #         set_trace()
+
+        return trajectory_mean[:action_range.shape[-1]]
+        # return action_trajectories[trajectory_losses.argmin()][:action_range.shape[-1]]
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False):
         vec_to_goal = (goal - prev_goal)[:2]
@@ -301,22 +303,20 @@ class MPCAgent:
         if not signed:
             perp_loss = np.abs(perp_loss)
 
-        # return relevant losses for current state
-        if current:
-            return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze()
-
-        # action norm loss
-        norm_loss = -np.linalg.norm(action, axis=1).squeeze()
-
         # object vs. robot heading loss
         if self.use_object:
             robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
-            heading_diff = (robot_theta + np.pi - object_theta) % (2 * np.pi)
+            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
             heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1).squeeze()
-            # print(f"Robot: {robot_theta}, Object: {object_theta}")
-            # print("Object Robot Heading Diff: ", heading_diff_loss)
         else:
             heading_diff_loss = 0.
+
+        # return relevant losses for current state
+        if current:
+            return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze(), heading_diff_loss.squeeze(), sep_loss.squeeze()
+
+        # action norm loss
+        norm_loss = -np.linalg.norm(action, axis=1).squeeze()
 
         return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
 

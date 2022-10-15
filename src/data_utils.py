@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from pdb import set_trace
 
 # GENERAL PYTORCH UTILS
 
@@ -159,7 +160,6 @@ class DataUtils:
                 robot_vel, robot_next_vel = state[:, 3:6], next_state[:, 3:6]
                 robot_vel_delta = robot_next_vel - robot_vel
                 state_delta = torch.cat((state_delta_xysc, robot_vel_delta), dim=1)
-
         return state_delta
 
     def compute_next_state(self, state, state_delta):

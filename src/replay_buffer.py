@@ -13,6 +13,10 @@ class ReplayBuffer:
         self.full = False
         self.idx = 0
 
+    @property
+    def size(self):
+        return self.capacity if self.full else self.idx
+
     def add(self, state, action, next_state):
         np.copyto(self.states[self.idx], state)
         np.copyto(self.actions[self.idx], action)
@@ -23,9 +27,8 @@ class ReplayBuffer:
             self.full = True
 
     def sample(self, sample_size):
-        n_stored = self.capacity if self.full else self.idx
-        sample_size = min(n_stored, sample_size)
-        stored_idxs = np.arange(n_stored)
+        sample_size = min(self.size, sample_size)
+        stored_idxs = np.arange(self.size)
         sample_idx = np.random.choice(stored_idxs, sample_size)
 
         states = self.states[sample_idx]
