@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 import data_utils as dtu
+from mpc_policies import MPPIPolicy
 
 device = torch.device("cpu")
 
@@ -20,14 +21,13 @@ device = torch.device("cpu")
 class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, dtu=None, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
-        assert hidden_depth > 1
-        layers = []
-        for i in range(hidden_depth - 1):
-            layers += [nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim)]
-            layers += [nn.ReLU()]
-            layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
-            layers += [nn.Dropout(p=dropout)]
-        layers += [nn.Linear(hidden_dim, output_dim)]
+        assert hidden_depth >= 1
+        input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
+        hidden_layers = []
+        for _ in range(hidden_depth):
+            hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
+        output_layer = [nn.Linear(hidden_dim, output_dim)]
+        layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
         self.output_dim = output_dim
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
@@ -64,7 +64,7 @@ class DynamicsNetwork(nn.Module):
 
         if self.dist:
             mean = self.net(state_action)
-            std = torch.ones_like(mean) * 0.1
+            std = torch.ones_like(mean) * self.std
             dist = torch.distributions.normal.Normal(mean, std)
             if return_dist:
                 return dist
@@ -127,16 +127,20 @@ class MPCAgent:
         assert ensemble > 0
         if use_object:
             if use_velocity:
-                input_dim = 12
+                self.state_dim = 12
+                input_dim = 14
                 output_dim = 14
             else:
+                self.state_dim = 6
                 input_dim = 8
                 output_dim = 8
         else:
             if use_velocity:
+                self.state_dim = 5
                 input_dim = 7
                 output_dim = 7
             else:
+                self.state_dim = 2
                 input_dim = 4
                 output_dim = 4
 
@@ -145,102 +149,18 @@ class MPCAgent:
                                 for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
+        self.policy = MPPIPolicy(action_dim=2, action_range=None, models=self.models, simulate_fn=self.simulate, cost_fn=self.compute_costs)
         self.seed = seed
         self.scale = scale
         self.ensemble = ensemble
         self.use_object = use_object
 
-
     @property
     def model(self):
         return self.models[0]
 
-    def mpc_action(self, state, prev_goal, goal, action_range, n_steps=10, n_samples=1000, perp_weight=0.0,
-                   heading_weight=0.0, dist_weight=1.0, norm_weight=0.0, sep_weight=0.0, heading_diff_weight=0.0,
-                   dist_bonus_weight=0.0, robot_goals=False, mpc_softmax=False, mpc_refine_iters=5, softmax_gamma=50000):
-        original_state = state
-
-        alpha = 0.9
-        beta = 0.7
-        n_best_losses = 30
-        action_dim = action_range.shape[-1]
-        action_trajectory_dim = n_steps * action_dim
-        all_actions = np.random.uniform(*action_range, size=(n_samples, n_steps, action_dim))
-
-        trajectory_mean = np.zeros(action_trajectory_dim)
-        trajectory_std = np.zeros(action_trajectory_dim)
-        all_losses = np.empty((n_samples, n_steps))
-
-        for k in range(mpc_refine_iters):
-            state = np.tile(original_state, (n_samples, 1))
-            if k > 0:
-                if mpc_softmax:
-                    u = np.random.randn(n_samples, action_trajectory_dim).reshape(n_samples, n_steps, action_dim) * 0.3
-                    n = u
-                    for i in range(1, n_steps):
-                        n[:, i] = beta * u[:, i] + (1 - beta) * n[:, i-1]
-                    all_actions = (trajectory_mean + n.reshape(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
-                else:
-                    all_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(n_samples, action_trajectory_dim)).reshape(n_samples, n_steps, action_dim)
-                all_actions = np.clip(all_actions, *action_range)
-
-            for i in range(n_steps):
-                action = all_actions[:, i]
-                state = self.get_prediction(state, action, sample=False, use_ensemble=False)
-
-                dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss = \
-                        self.compute_losses(state, prev_goal, goal, action=action, robot_goals=robot_goals)
-
-                dist_bonus1 = -(dist_loss < 0.08).astype('float')
-                dist_bonus2 = -(dist_loss < 0.04).astype('float')
-                dist_bonus3 = -(dist_loss < 0.01).astype('float')
-                # normalize appropriate losses and compute total loss
-                heading_loss = heading_loss * (dist_loss < 0.04).astype('float')
-                all_losses[:, i] = (dist_weight + perp_weight * perp_loss + norm_weight * norm_loss + heading_weight * heading_loss
-                                    + sep_weight * sep_loss + heading_diff_weight * heading_diff_loss) * dist_loss \
-                                    + 0 * (dist_bonus1 + 10 * dist_bonus2 + 100 * dist_bonus3)
-                # all_losses[:, i] = dist_weight * dist_loss + perp_weight * perp_loss \
-                #                         + dist_bonus1 + 2 * dist_bonus2 + 5 * dist_bonus3
-
-            # trajectory_losses = all_losses.sum(axis=1)
-            # trajectory_losses = trajectory_losses / trajectory_losses.sum()
-
-            trajectory_losses = all_losses.sum(axis=1)
-            if mpc_softmax:
-                # print("softmax")
-                trajectory_losses -= trajectory_losses.min()
-                trajectory_losses = trajectory_losses / trajectory_losses.max()
-
-            if mpc_refine_iters > 1:
-                action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
-
-                if mpc_softmax:
-                    # print("SOFTMAX")
-                    weights = np.exp(softmax_gamma * -trajectory_losses)
-                    weights_sum = weights.sum()
-                    weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)
-                    # weighted_std =
-                    trajectory_mean = weighted_trajectories / weights.sum()
-                else:
-                    best_losses_idx = np.argsort(-trajectory_losses)[-n_best_losses:]
-                    action_trajectories = all_actions.reshape(n_samples, action_trajectory_dim)
-                    best_trajectories = action_trajectories[best_losses_idx]
-                    best_trajectories_mean = best_trajectories.mean(axis=0)
-                    best_trajectories_std = best_trajectories.std(axis=0)
-
-                    trajectory_mean = alpha * best_trajectories_mean + (1 - alpha) * trajectory_mean
-                    trajectory_std = alpha * best_trajectories_std + (1 - alpha) * trajectory_std
-
-                trajectory_std = np.stack((trajectory_std, np.ones_like(trajectory_std) * 0.02)).max(axis=0)
-            else:
-                best_idx = trajectory_losses.argmin()
-                return all_actions[best_idx, 0]
-
-        # if original_state[0] > 1.3 and original_state[1] < 0.37:
-        #         set_trace()
-
-        return trajectory_mean[:action_range.shape[-1]]
-        # return action_trajectories[trajectory_losses.argmin()][:action_range.shape[-1]]
+    def get_action(self, state, prev_goal, goal, cost_weights, params):
+        return self.policy.get_action(state, prev_goal, goal, cost_weights, params)
 
     def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False):
         vec_to_goal = (goal - prev_goal)[:2]
@@ -320,37 +240,16 @@ class MPCAgent:
 
         return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
 
-    def get_prediction(self, state, action, sample=False, delta=False, use_ensemble=False, model_no=0):
+    def get_prediction(self, state, action, model, sample=False, delta=False):
         """
         Accepts state [x, y, theta] or [x, y, theta, x, y, theta]
         Returns next_state [x, y, theta] or [x, y, theta, x, y, theta]
         """
-        if use_ensemble:
-            state_delta_sum = torch.zeros((len(state), 8 if self.use_object else 4))
-            next_state_sum = torch.zeros((len(state), 6 if self.use_object else 3))
+        model.eval()
 
-            for model in self.models:
-                model.eval()
-
-                cur_state, cur_action = dtu.as_tensor(state, action)
-                cur_state, cur_action = dtu.to_device(cur_state, cur_action)
-
-                with torch.no_grad():
-                    state_delta_model = model(state, action, sample=sample)
-                    next_state_model = self.dtu.compute_next_state(state, state_delta_model)
-
-                state_delta_sum += state_delta_model
-                next_state_sum += next_state_model
-
-            state_delta_model = state_delta_sum / len(self.models)
-            next_state_model = next_state_sum / len(self.models)
-        else:
-            model = self.models[model_no]
-            model.eval()
-
-            with torch.no_grad():
-                state_delta_model = model(state, action, sample=sample)
-                next_state_model = self.dtu.compute_next_state(state, state_delta_model)
+        with torch.no_grad():
+            state_delta_model = model(state, action, sample=sample)
+            next_state_model = self.dtu.compute_next_state(state, state_delta_model)
 
         if delta:
             return dtu.dcn(state_delta_model)
@@ -360,6 +259,83 @@ class MPCAgent:
             next_state_model[:, 5] %= 2 * np.pi
 
         return dtu.dcn(next_state_model)
+
+    def simulate(self, initial_state, action_sequence):
+        n_samples, horizon, _ = action_sequence.shape
+        initial_state = np.tile(initial_state, (n_samples, 1))
+        state_sequence = np.empty((len(self.models), n_samples, horizon, self.state_dim))
+
+        for i, model in enumerate(self.models):
+            for t in range(horizon):
+                action = action_sequence[t]
+                if t == 0:
+                    state_sequence[i, :, t] = self.get_prediction(initial_state, action, model)
+                else:
+                    state_sequence[i, :, t] = self.get_prediction(state_sequence[i, :, t-1], action, model)
+
+        return state_sequence
+
+    def compute_costs(self, state, prev_goal, goal, action, robot_goals=False, current=False, signed=False):
+        # separation loss
+        if self.use_object:
+            robot_state, object_state = state[:, :, :3], state[:, :, 3:6]
+            object_to_robot_xy = (robot_state - object_state)[:, :, :2]
+            sep_loss = np.linalg.norm(object_to_robot_xy, axis=1)
+
+            effective_state = robot_state if robot_goals else object_state
+        else:
+            effective_state = state[:, :, :3]     # ignore velocity
+            sep_loss = np.array([0.])
+
+        x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
+        vec_to_goal = (goal - effective_state)[:, :, :, :2]
+
+        # heading loss
+        target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
+        angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
+        angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
+
+        left = (angle_diff_side < np.pi) * 2 - 1.
+        forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
+
+        heading_loss = angle_diff_dir
+        heading_loss[forward == -1] = (heading_loss[forward == -1] + np.pi) % (2 * np.pi)
+        heading_loss = np.stack((heading_loss, 2 * np.pi - heading_loss)).min(axis=0)
+
+        if signed:
+            heading_loss *= left * forward
+
+        # dist loss
+        dist_loss = np.linalg.norm(vec_to_goal, axis=-1)
+
+        if signed:
+            angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
+            angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
+            forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
+            dist_loss *= forward
+
+        # perp loss
+        x1, y1, _ = prev_goal
+        x2, y2, _ = goal
+        perp_denom = np.linalg.norm((goal - prev_goal)[:2])
+
+        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
+
+        if not signed:
+            perp_loss = np.abs(perp_loss)
+
+        # object vs. robot heading loss
+        if self.use_object:
+            robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
+            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
+            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
+        else:
+            heading_diff_loss = np.array([0.])
+
+        # action norm loss
+        norm_loss = -np.linalg.norm(action, axis=-1)
+
+        return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
 
     def train(self, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         state, action, next_state = dtu.as_tensor(state, action, next_state)
