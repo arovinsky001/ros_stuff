@@ -54,8 +54,11 @@ class MPPIPolicy(MPCPolicy):
                 ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
         ensemble_costs = (ensemble_costs + 1) * cost_dict["distance"]
 
+        # discount costs through time
+        # discount = 0.9 ** np.arange(horizon)
+        # ensemble_costs *= discount[None, None, :]
+
         # average over ensemble and horizon dimensions to get per-sample cost
-        print("ENSEMBLE:", ensemble_costs.shape[0])
         total_costs = ensemble_costs.mean(axis=(0, 2))
         total_costs -= total_costs.min()
         total_costs /= total_costs.max()

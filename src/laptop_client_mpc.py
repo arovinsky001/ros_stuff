@@ -54,11 +54,11 @@ class RealMPC():
         # action params
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.2
+        self.duration = 0.4 if self.use_object else 0.2
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
-        self.gradient_steps = 5
+        self.gradient_steps = 1
         self.online = online
         self.save_freq = save_freq
         self.pretrain_samples = pretrain_samples
@@ -84,26 +84,27 @@ class RealMPC():
         self.last_action_time = 0.
 
         # set experiment title and setup for logging
-        exp_title = f"{'object' if self.robot_goals else 'robot'}_goals"
+        exp_title = f"{'robot' if self.robot_goals else 'object'}goals"
         if self.pretrain or self.load_agent:
             exp_title += f"_pretrain{self.pretrain_samples}"
         if self.online:
             exp_title += "_online"
 
-        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{exp_title}/"
-        self.plot_path = self.exp_path + "plots"
-        self.state_path = self.exp_path + "states"
-        self.agent_path = self.exp_path = "agents"
+        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if self.use_object else 'robot'}/{exp_title}/"
+        self.buffer_path = "/home/bvanbuskirk/Desktop/experiments/buffers/"
+        self.plot_path = self.exp_path + "plots/"
+        self.state_path = self.exp_path + "states/"
+        self.agent_path = self.exp_path = "agents/"
         Path(self.exp_path).mkdir(parents=True, exist_ok=True)
         Path(self.plot_path).mkdir(parents=True, exist_ok=True)
         Path(self.state_path).mkdir(parents=True, exist_ok=True)
         Path(self.agent_path).mkdir(parents=True, exist_ok=True)
-        Path("/home/bvanbuskirk/Desktop/experiments/buffers/").mkdir(parents=True, exist_ok=True)
+        Path(self.buffer_path).mkdir(parents=True, exist_ok=True)
 
         #data for dynamics plot
         self.all_actions = []
-        if os.path.exists("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl") and not new_buffer:
-            with open("/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/replay_buffers/buffer.pkl", "rb") as f:
+        if not new_buffer and os.path.exists(self.buffer_path + f"{'object' if self.use_object else 'robot'}_buffer.pkl"):
+            with open(self.buffer_path + f"{'object' if self.use_object else 'robot'}_buffer.pkl", "rb") as f:
                 self.replay_buffer = pkl.load(f)
         else:
             state_dim = 6 if self.use_object else 3
@@ -126,14 +127,24 @@ class RealMPC():
         self.define_goal_trajectory()
 
         # weights for MPC cost terms
-        self.cost_weights = {
-            "heading": 0.15,
-            "perpendicular": 0.,
-            "action_norm": 0.,
-            "distance_bonus": 0.,
-            "separation": 0.,
-            "heading_difference": 0.,
-        }
+        if self.robot_goals:
+            self.cost_weights = {
+                "heading": 0.25,
+                "perpendicular": 0.,
+                "action_norm": 0.,
+                "distance_bonus": 0.,
+                "separation": 0.,
+                "heading_difference": 0.,
+            }
+        else:
+            self.cost_weights = {
+                "heading": 0.1,
+                "perpendicular": 0.,
+                "action_norm": 0.,
+                "distance_bonus": 0.,
+                "separation": 0.1,
+                "heading_difference": 0.1,
+            }
 
         self.mpc_params = {
             "beta": 0.5,
@@ -201,7 +212,7 @@ class RealMPC():
             states, actions, next_states = rb.sample(rb.size)
 
         training_losses, test_losses, test_idx = self.agent.train(
-                states, actions, next_states, set_scalers=True, epochs=self.train_epochs, batch_size=5000, use_all_data=self.use_all_data)
+                states, actions, next_states, set_scalers=True, epochs=self.train_epochs, batch_size=500, use_all_data=self.use_all_data)
 
         if self.save_agent:
             with open(AGENT_PATH, "wb") as f:
@@ -328,8 +339,8 @@ class RealMPC():
         plt.plot(plot_robot_states[:, 0], plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
         plt.plot(plot_object_states[:, 0], plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
         if len(self.plot_goals) == 1 or not self.plot:
-            plt.xlim((0, self.corner_pos[0]))
-            plt.ylim((0, self.corner_pos[1]))
+            plt.xlim((self.corner_pos[0], 0))
+            plt.ylim((self.corner_pos[1], 0))
             plt.legend()
             plt.ion()
             plt.show()
@@ -514,14 +525,14 @@ class RealMPC():
 
         if self.replay_buffer.idx % self.save_freq == 0:
             print(f"\nSAVING REPLAY BUFFER WITH {self.replay_buffer.capacity if self.replay_buffer.full else self.replay_buffer.idx} TRANSITIONS\n")
-            with open("/home/bvanbuskirk/Desktop/experiments/buffers/buffer.pkl", "wb") as f:
+            with open(self.buffer_path + f"{'object' if self.use_object else 'robot'}_buffer.pkl", "wb") as f:
                 pkl.dump(self.replay_buffer, f)
 
     def update_model_online(self):
         if self.replay_buffer.size >= self.random_steps:
             for model in self.agent.models:
                 for _ in range(self.gradient_steps):
-                    states, actions, next_states = self.replay_buffer.sample(1000)
+                    states, actions, next_states = self.replay_buffer.sample(300)
                     model.update(states, actions, next_states)
 
 def update_state(msg):

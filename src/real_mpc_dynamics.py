@@ -26,7 +26,7 @@ class DynamicsNetwork(nn.Module):
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-            # hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
+            hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
@@ -163,84 +163,6 @@ class MPCAgent:
     def get_action(self, state, prev_goal, goal, cost_weights, params):
         return self.policy.get_action(state, prev_goal, goal, cost_weights, params)
 
-    def compute_losses(self, state, prev_goal, goal, action=None, robot_goals=False, current=False, signed=False):
-        vec_to_goal = (goal - prev_goal)[:2]
-        if current:
-            state = state[None, :]
-            goals = goal[None, :]
-            vecs_to_goal = vec_to_goal[None, :]
-        else:
-            n_samples = len(state)
-            goals = np.tile(goal, (n_samples, 1))
-            vecs_to_goal = np.tile(vec_to_goal, (n_samples, 1))
-
-        if self.use_object:
-            # separation loss
-            robot_state, object_state = state[:, :3], state[:, 3:6]
-            object_to_robot_xy = (robot_state - object_state)[:, :2]
-            sep_loss = np.linalg.norm(object_to_robot_xy, axis=1)
-
-            effective_state = robot_state if robot_goals else object_state
-        else:
-            effective_state = state[:, :3]     # ignore velocity
-            sep_loss = np.array([0.])
-
-        x0, y0, current_angle = effective_state.T
-
-        # heading loss
-        target_angle = np.arctan2(vecs_to_goal[:, 1], vecs_to_goal[:, 0])
-        angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
-        angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
-
-        left = (angle_diff_side < np.pi) * 2 - 1.
-        forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
-
-        heading_loss = angle_diff_dir
-        heading_loss[forward == -1] = (heading_loss[forward == -1] + np.pi) % (2 * np.pi)
-        heading_loss = np.stack((heading_loss, 2 * np.pi - heading_loss)).min(axis=0)
-
-        if signed:
-            heading_loss *= left * forward
-
-        # dist loss
-        dist_loss = np.linalg.norm((goals - effective_state)[:, :2], axis=1)
-
-        if signed:
-            vecs_to_goal_state = (goals - effective_state)[:, :2]
-            target_angle_state = np.arctan2(vecs_to_goal_state[:, 1], vecs_to_goal_state[:, 0])
-
-            angle_diff_side = (target_angle_state - current_angle) % (2 * np.pi)
-            angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
-            forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
-            dist_loss *= forward
-
-        # perp loss
-        x1, y1, _ = prev_goal
-        x2, y2, _ = goal
-        perp_denom = np.linalg.norm(vec_to_goal)
-
-        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
-
-        if not signed:
-            perp_loss = np.abs(perp_loss)
-
-        # object vs. robot heading loss
-        if self.use_object:
-            robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
-            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
-            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1).squeeze()
-        else:
-            heading_diff_loss = np.array([0.])
-
-        # return relevant losses for current state
-        if current:
-            return dist_loss.squeeze(), heading_loss.squeeze(), perp_loss.squeeze(), heading_diff_loss.squeeze(), sep_loss.squeeze()
-
-        # action norm loss
-        norm_loss = -np.linalg.norm(action, axis=1).squeeze()
-
-        return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
-
     def get_prediction(self, state, action, model, sample=False, delta=False):
         """
         Accepts state [x, y, theta] or [x, y, theta, x, y, theta]
@@ -281,7 +203,7 @@ class MPCAgent:
         if self.use_object:
             robot_state, object_state = state[:, :, :, :3], state[:, :, :, 3:6]
             object_to_robot_xy = (robot_state - object_state)[:, :, :, :2]
-            sep_cost = np.linalg.norm(object_to_robot_xy, axis=1)
+            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
 
             effective_state = robot_state if robot_goals else object_state
         else:
@@ -302,6 +224,22 @@ class MPCAgent:
         heading_cost = angle_diff_dir
         heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
         heading_cost = np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
+
+        # #
+        # ca = robot_state.transpose(3, 0, 1, 2)[2]
+        # vtg = (goal - robot_state)[:, :, :, :2]
+        # ta = np.arctan2(vtg[:, :, :, 1], vtg[:, :, :, 0])
+        # target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
+        # angle_diff_side = (target_angle - ca) % (2 * np.pi)
+        # angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
+
+        # left = (angle_diff_side < np.pi) * 2 - 1.
+        # forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
+
+        # heading_cost = angle_diff_dir
+        # heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
+        # heading_cost += np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
+        # #
 
         if signed:
             heading_cost *= left * forward
@@ -352,14 +290,15 @@ class MPCAgent:
 
         n_test = int(len(state) * 0.1)
         all_idx = torch.arange(len(state))
-        train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=self.seed)
-        test_state, test_action, test_next_state = state[test_idx], action[test_idx], next_state[test_idx]
-        test_state_delta = self.dtu.state_delta_xysc(test_state, test_next_state)
-
-        if use_all_data:
-            train_idx = all_idx
 
         for k, model in enumerate(self.models):
+            train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=self.seed + k)
+            test_state, test_action, test_next_state = state[test_idx], action[test_idx], next_state[test_idx]
+            test_state_delta = self.dtu.state_delta_xysc(test_state, test_next_state)
+
+            if use_all_data:
+                train_idx = all_idx
+
             train_state = state[train_idx]
             train_action = action[train_idx]
             train_next_state = next_state[train_idx]
