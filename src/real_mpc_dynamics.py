@@ -26,6 +26,7 @@ class DynamicsNetwork(nn.Module):
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
+            # hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
@@ -136,11 +137,11 @@ class MPCAgent:
                 output_dim = 8
         else:
             if use_velocity:
-                self.state_dim = 5
+                self.state_dim = 6
                 input_dim = 7
                 output_dim = 7
             else:
-                self.state_dim = 2
+                self.state_dim = 3
                 input_dim = 4
                 output_dim = 4
 
@@ -182,7 +183,7 @@ class MPCAgent:
             effective_state = robot_state if robot_goals else object_state
         else:
             effective_state = state[:, :3]     # ignore velocity
-            sep_loss = 0.
+            sep_loss = np.array([0.])
 
         x0, y0, current_angle = effective_state.T
 
@@ -229,7 +230,7 @@ class MPCAgent:
             heading_diff = (robot_theta - object_theta) % (2 * np.pi)
             heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1).squeeze()
         else:
-            heading_diff_loss = 0.
+            heading_diff_loss = np.array([0.])
 
         # return relevant losses for current state
         if current:
@@ -267,7 +268,7 @@ class MPCAgent:
 
         for i, model in enumerate(self.models):
             for t in range(horizon):
-                action = action_sequence[t]
+                action = action_sequence[:, t]
                 if t == 0:
                     state_sequence[i, :, t] = self.get_prediction(initial_state, action, model)
                 else:
@@ -275,22 +276,22 @@ class MPCAgent:
 
         return state_sequence
 
-    def compute_costs(self, state, prev_goal, goal, action, robot_goals=False, current=False, signed=False):
-        # separation loss
+    def compute_costs(self, state, action, prev_goal, goal, robot_goals=False, signed=False):
+        # separation cost
         if self.use_object:
-            robot_state, object_state = state[:, :, :3], state[:, :, 3:6]
-            object_to_robot_xy = (robot_state - object_state)[:, :, :2]
-            sep_loss = np.linalg.norm(object_to_robot_xy, axis=1)
+            robot_state, object_state = state[:, :, :, :3], state[:, :, :, 3:6]
+            object_to_robot_xy = (robot_state - object_state)[:, :, :, :2]
+            sep_cost = np.linalg.norm(object_to_robot_xy, axis=1)
 
             effective_state = robot_state if robot_goals else object_state
         else:
-            effective_state = state[:, :, :3]     # ignore velocity
-            sep_loss = np.array([0.])
+            effective_state = state[:, :, :, :3]     # ignore velocity
+            sep_cost = np.array([0.])
 
         x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
         vec_to_goal = (goal - effective_state)[:, :, :, :2]
 
-        # heading loss
+        # heading cost
         target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
         angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
         angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
@@ -298,15 +299,15 @@ class MPCAgent:
         left = (angle_diff_side < np.pi) * 2 - 1.
         forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
 
-        heading_loss = angle_diff_dir
-        heading_loss[forward == -1] = (heading_loss[forward == -1] + np.pi) % (2 * np.pi)
-        heading_loss = np.stack((heading_loss, 2 * np.pi - heading_loss)).min(axis=0)
+        heading_cost = angle_diff_dir
+        heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
+        heading_cost = np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
 
         if signed:
-            heading_loss *= left * forward
+            heading_cost *= left * forward
 
-        # dist loss
-        dist_loss = np.linalg.norm(vec_to_goal, axis=-1)
+        # dist cost
+        dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
 
         if signed:
             angle_diff_side = (target_angle - current_angle) % (2 * np.pi)
@@ -314,28 +315,37 @@ class MPCAgent:
             forward = (angle_diff_dir < np.pi / 2) * 2 - 1.
             dist_loss *= forward
 
-        # perp loss
+        # perp cost
         x1, y1, _ = prev_goal
         x2, y2, _ = goal
         perp_denom = np.linalg.norm((goal - prev_goal)[:2])
 
-        perp_loss = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
+        perp_cost = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
 
         if not signed:
-            perp_loss = np.abs(perp_loss)
+            perp_cost = np.abs(perp_cost)
 
-        # object vs. robot heading loss
+        # object vs. robot heading cost
         if self.use_object:
-            robot_theta, object_theta = robot_state[:, -1], object_state[:, -1]
+            robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
             heading_diff = (robot_theta - object_theta) % (2 * np.pi)
-            heading_diff_loss = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
+            heading_diff_cost = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
         else:
-            heading_diff_loss = np.array([0.])
+            heading_diff_cost = np.array([0.])
 
-        # action norm loss
-        norm_loss = -np.linalg.norm(action, axis=-1)
+        # action norm cost
+        norm_cost = -np.linalg.norm(action, axis=-1)
 
-        return dist_loss, heading_loss, perp_loss, norm_loss, sep_loss, heading_diff_loss
+        cost_dict = {
+            "distance": dist_cost,
+            "heading": heading_cost,
+            "perpendicular": perp_cost,
+            "action_norm": norm_cost,
+            "separation": sep_cost,
+            "heading_difference": heading_diff_cost,
+        }
+
+        return cost_dict
 
     def train(self, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
         state, action, next_state = dtu.as_tensor(state, action, next_state)

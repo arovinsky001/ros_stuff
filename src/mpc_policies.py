@@ -15,7 +15,7 @@ class MPCPolicy:
         return
 
 
-class MPPIPolicy:
+class MPPIPolicy(MPCPolicy):
     def __init__(self, **kwargs):
         self.trajectory_mean = None
         return super().__init__(**kwargs)
@@ -25,6 +25,7 @@ class MPPIPolicy:
         n_samples = params["sample_trajectories"]
         beta = params["beta"]
         gamma = params["gamma"]
+        robot_goals = params["robot_goals"]
 
         if self.trajectory_mean is None:
             self.trajectory_mean = np.zeros((horizon, self.action_dim))
@@ -45,19 +46,22 @@ class MPPIPolicy:
 
         sampled_actions = np.clip(sampled_actions, *self.action_range)
         predicted_state_sequence = self.simulate(state, sampled_actions)
-        cost_dict = self.compute_costs(predicted_state_sequence, prev_goal, goal, sampled_actions)
+        cost_dict = self.compute_costs(predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals=robot_goals)
 
         ensemble_costs = np.zeros(predicted_state_sequence.shape[:-1])
         for cost_type in cost_dict:
             if cost_type != "distance":
                 ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
-        ensemble_costs = (ensemble_costs) * cost_dict["distance"]
+        ensemble_costs = (ensemble_costs + 1) * cost_dict["distance"]
 
-        total_costs = ensemble_costs.mean(axis=0)
-        total_rewards = -total_costs
+        # average over ensemble and horizon dimensions to get per-sample cost
+        print("ENSEMBLE:", ensemble_costs.shape[0])
+        total_costs = ensemble_costs.mean(axis=(0, 2))
+        total_costs -= total_costs.min()
+        total_costs /= total_costs.max()
         action_sequences = sampled_actions.reshape((n_samples, -1))
 
-        weights = np.exp(gamma * (total_rewards - total_rewards.max()))
+        weights = np.exp(gamma * -total_costs)
         weighted_trajectories = (weights[:, None] * action_sequences).sum(axis=0)
         self.trajectory_mean = weighted_trajectories / weights.sum()
 

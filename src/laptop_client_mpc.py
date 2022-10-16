@@ -23,10 +23,11 @@ np.random.seed(SEED)
 AGENT_PATH = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/agent.pkl"
 
 class RealMPC():
-    def __init__(self, robot_id, object_id, mpc_steps, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
+    def __init__(self, robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
                  new_buffer, pretrain, robot_goals, scale, mpc_softmax, save_freq, online, mpc_refine_iters,
                  pretrain_samples, random_steps, rate, use_all_data, debug, robot_pos, object_pos, corner_pos,
-                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, use_velocity, train_epochs, mpc_gamma):
+                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, use_velocity, train_epochs, mpc_gamma,
+                 ensemble):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -47,17 +48,13 @@ class RealMPC():
         self.state_timestamp = state_timestamp
 
         # MPC params
-        self.mpc_steps = mpc_steps
-        self.mpc_samples = mpc_samples
-        self.mpc_softmax = mpc_softmax
-        self.mpc_gamma = mpc_gamma
         self.mpc_refine_iters = mpc_refine_iters
         self.use_object = (self.object_id >= 0)
 
         # action params
         max_pwm = 0.999
         self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.4
+        self.duration = 0.2
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
@@ -140,16 +137,17 @@ class RealMPC():
 
         self.mpc_params = {
             "beta": 0.5,
-            "gamma": 40,
-            "horizon": mpc_steps,
+            "gamma": mpc_gamma,
+            "horizon": mpc_horizon,
             "sample_trajectories": mpc_samples,
+            "robot_goals": robot_goals,
         }
 
         self.plot_robot_states = []
         self.plot_object_states = []
         self.plot_goals = []
 
-        self.losses = np.empty((0, 4))      # dist, heading, perp, total
+        self.costs = np.empty((0, 4))      # dist, heading, perp, total
 
         self.time_elapsed = 0.
         self.logged_transitions = 0
@@ -160,8 +158,8 @@ class RealMPC():
             with open(AGENT_PATH, "rb") as f:
                 self.agent = pkl.load(f)
         else:
-            self.agent = MPCAgent(seed=SEED, dist=True, scale=self.scale, hidden_dim=200, hidden_depth=2,
-                                  lr=0.001, dropout=0.0, std=0.1, ensemble=1, use_object=self.use_object,
+            self.agent = MPCAgent(seed=SEED, dist=True, scale=self.scale, hidden_dim=200, hidden_depth=1,
+                                  lr=0.001, dropout=0.0, std=0.1, ensemble=ensemble, use_object=self.use_object,
                                   use_velocity=args.use_velocity)
             if pretrain:
                 self.train_model()
@@ -219,7 +217,7 @@ class RealMPC():
 
         test_state, test_action = states[test_idx], actions[test_idx]
         test_state_delta = dtu.dcn(state_delta[test_idx])
-        pred_state_delta = self.agent.get_prediction(test_state, test_action, sample=False, delta=True, use_ensemble=False)
+        pred_state_delta = self.agent.get_prediction(test_state, test_action, self.agent.model, sample=False, delta=True)
 
         error = abs(pred_state_delta - test_state_delta)
         print("\nERROR MEAN:", error.mean(axis=0))
@@ -263,18 +261,23 @@ class RealMPC():
         self.front_circle_center = front_circle_center_rel * self.corner_pos[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
-    def record_losses(self, last_goal, goal):
-        dist_loss, heading_loss, perp_loss, heading_diff_loss, sep_loss = self.agent.compute_losses(
-                self.get_state(), last_goal, goal,
-                current=True, robot_goals=self.robot_goals
+    def record_costs(self, last_goal, goal):
+        cost_dict = self.agent.compute_costs(
+                self.get_state()[None, None, None, :], np.array([[[[0., 0.]]]]), last_goal, goal, robot_goals=self.robot_goals
                 )
-        total_loss = dist_loss * (self.dist_weight + heading_loss * self.heading_weight + perp_loss * self.perp_weight \
-                                    + heading_diff_loss * self.heading_diff_weight + sep_loss * self.sep_weight)
-        if self.started:
-            losses_to_record = np.array([[dist_loss, heading_loss, perp_loss, total_loss]])
-            self.losses = np.append(self.losses, losses_to_record, axis=0)
 
-        return dist_loss, heading_loss, perp_loss, heading_diff_loss, sep_loss, total_loss
+        total_cost = 0
+        for cost_type, cost in cost_dict.items():
+            cost_dict[cost_type] = cost.squeeze()
+            if cost_type != "distance":
+                total_cost += cost.squeeze() * self.cost_weights[cost_type]
+        total_cost *= cost_dict["distance"]
+
+        if self.started:
+            costs_to_record = np.array([[cost_dict["distance"], cost_dict["heading"], cost_dict["perpendicular"], total_cost]])
+            self.costs = np.append(self.costs, costs_to_record, axis=0)
+
+        return cost_dict, total_cost
 
     def record_plot_states(self):
         robot_state_to_plot = self.robot_pos.copy()
@@ -401,21 +404,16 @@ class RealMPC():
         print(f"\n\n\n\nNO. {self.n_prints}")
         print("/////////////////////////////////////////////////")
         print("=================================================")
-        # print(f"RECORDING {len(idx)} LOSSES\n")
         print("GOAL:", goal)
         print("STATE:", state)
         print("ACTION:", action)
         print("ACTION NORM:", np.linalg.norm(action) / np.sqrt(2), "\n")
 
-        dist_loss, heading_loss, perp_loss, heading_diff_loss, sep_loss, total_loss = \
-            self.record_losses(last_goal, goal)
+        cost_dict, total_cost = self.record_costs(last_goal, goal)
 
-        print("DIST:", dist_loss)
-        print("HEADING:", heading_loss)
-        print("PERP:", perp_loss)
-        print("HEADING DIFF:", heading_diff_loss)
-        print("SEPARATION:", sep_loss)
-        print("TOTAL:", total_loss)
+        for cost_type, cost in cost_dict.items():
+            print(f"{cost_type}: {cost}")
+        print("TOTAL:", total_cost)
 
         print("=================================================")
         print("/////////////////////////////////////////////////")
@@ -447,11 +445,11 @@ class RealMPC():
         if self.time_elapsed > self.lap_time:
             self.laps += 1
             # Print current cumulative loss per lap completed
-            dist_losses, heading_losses, perp_losses, total_losses = self.losses.T
-            data = np.array([[dist_losses.mean(), dist_losses.std(), dist_losses.min(), dist_losses.max()],
-                         [perp_losses.mean(), perp_losses.std(), perp_losses.min(), perp_losses.max()],
-                         [heading_losses.mean(), heading_losses.std(), heading_losses.min(), heading_losses.max()],
-                         [total_losses.mean(), total_losses.std(), total_losses.min(), total_losses.max()]])
+            dist_costs, heading_costs, perp_costs, total_costs = self.costs.T
+            data = np.array([[dist_costs.mean(), dist_costs.std(), dist_costs.min(), dist_costs.max()],
+                         [perp_costs.mean(), perp_costs.std(), perp_costs.min(), perp_costs.max()],
+                         [heading_costs.mean(), heading_costs.std(), heading_costs.min(), heading_costs.max()],
+                         [total_costs.mean(), total_costs.std(), total_costs.min(), total_costs.max()]])
             print("lap:", self.laps)
             print("rows: (dist, perp, heading, total)")
             print("cols: (mean, std, min, max)")
@@ -478,25 +476,25 @@ class RealMPC():
             if self.online:
                 with open(self.agent_path + f"lap{self.laps}_rb{self.replay_buffer.size}.npy", "wb") as f:
                     pkl.dump(self.agent, f)
-                self.losses = np.empty((0, 4))
+                self.costs = np.empty((0, 4))
 
         if self.laps == self.n_rollouts:
             self.done = True
 
     def dump_performance_metrics(self):
         with open(self.exp_path + "costs.npy", "wb") as f:
-            np.save(f, self.losses)
+            np.save(f, self.costs)
 
-        dist_losses, heading_losses, perp_losses, total_losses = self.losses.T
-        data = np.array([[dist_losses.mean(), dist_losses.std(), dist_losses.min(), dist_losses.max()],
-                         [perp_losses.mean(), perp_losses.std(), perp_losses.min(), perp_losses.max()],
-                         [heading_losses.mean(), heading_losses.std(), heading_losses.min(), heading_losses.max()],
-                         [total_losses.mean(), total_losses.std(), total_losses.min(), total_losses.max()]])
+        dist_costs, heading_costs, perp_costs, total_costs = self.costs.T
+        data = np.array([[dist_costs.mean(), dist_costs.std(), dist_costs.min(), dist_costs.max()],
+                         [perp_costs.mean(), perp_costs.std(), perp_costs.min(), perp_costs.max()],
+                         [heading_costs.mean(), heading_costs.std(), heading_costs.min(), heading_costs.max()],
+                         [total_costs.mean(), total_costs.std(), total_costs.min(), total_costs.max()]])
 
         #log average performance per random step subset sizes
         with open(self.exp_path + "costs.csv", "a", newline="") as csvfile:
             fwriter = csv.writer(csvfile, delimiter=',')
-            for total_loss, dist_loss, heading_loss in zip(total_losses, dist_losses, heading_losses):
+            for total_loss, dist_loss, heading_loss in zip(total_costs, dist_costs, heading_costs):
                 fwriter.writerow([total_loss, dist_loss, heading_loss])
             fwriter.writerow([])
 
@@ -544,7 +542,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Do MPC.')
     parser.add_argument('-robot_id', type=int, help='robot id for rollout')
     parser.add_argument('-object_id', type=int, default=-1, help='object id for rollout')
-    parser.add_argument('-mpc_steps', type=int)
+    parser.add_argument('-mpc_horizon', type=int)
     parser.add_argument('-mpc_samples', type=int)
     parser.add_argument('-n_rollouts', type=int)
     parser.add_argument('-tolerance', type=float, default=0.05)
@@ -569,6 +567,7 @@ if __name__ == '__main__':
     parser.add_argument('-use_velocity', action='store_true')
     parser.add_argument('-train_epochs', type=int, default=200)
     parser.add_argument('-mpc_gamma', type=float, default=50000)
+    parser.add_argument('-ensemble', type=int, default=1)
     args = parser.parse_args()
 
     pos_dim = 3
@@ -586,10 +585,10 @@ if __name__ == '__main__':
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    r = RealMPC(args.robot_id, args.object_id, args.mpc_steps, args.mpc_samples, args.n_rollouts, args.tolerance,
+    r = RealMPC(args.robot_id, args.object_id, args.mpc_horizon, args.mpc_samples, args.n_rollouts, args.tolerance,
                 args.lap_time, args.calibrate, args.plot, args.new_buffer, args.pretrain, args.robot_goals, args.scale,
                 args.mpc_softmax, args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
                 args.random_steps, args.rate, args.use_all_data, args.debug, robot_pos, object_pos, corner_pos,
                 robot_vel, object_vel, state_timestamp, args.save_agent, args.load_agent, args.use_velocity,
-                args.train_epochs, args.mpc_gamma)
+                args.train_epochs, args.mpc_gamma, args.ensemble)
     r.run()
