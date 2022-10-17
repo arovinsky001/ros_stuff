@@ -26,7 +26,7 @@ class Experiment():
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, random_steps, rate, use_all_data, debug,
-                 save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, robot_theta):
+                 save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, robot_theta, **kwargs):
         # flags for different stages of eval
         self.started = False
         self.done = False
