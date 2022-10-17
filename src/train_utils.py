@@ -42,7 +42,9 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
 
     test_state, test_action = states[test_idx], actions[test_idx]
     test_state_delta = dtu.dcn(state_delta[test_idx])
-    pred_state_delta = agent.get_prediction(test_state, test_action, agent.models[-1], sample=False, delta=True)
+    with torch.no_grad():
+        agent.models[-1].eval()
+        pred_state_delta = agent.models[-1](test_state, test_action, sample=False, delta=True)
 
     error = abs(pred_state_delta - test_state_delta)
     print("\nERROR MEAN:", error.mean(axis=0))

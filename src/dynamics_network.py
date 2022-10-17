@@ -6,7 +6,7 @@ import data_utils as dtu
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, dtu=None, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
+    def __init__(self, input_dim, output_dim, parent_dtu=None, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth >= 1
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
@@ -26,10 +26,10 @@ class DynamicsNetwork(nn.Module):
         self.input_scaler = None
         self.output_scaler = None
         self.net.apply(self._init_weights)
-        if dtu is None:
+        if parent_dtu is None:
             self.dtu = dtu.DataUtils(use_object=use_object)
         else:
-            self.dtu = dtu
+            self.dtu = parent_dtu
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -37,7 +37,7 @@ class DynamicsNetwork(nn.Module):
             if hasattr(m.bias, 'data'):
                 m.bias.data.fill_(0.0)
 
-    def forward(self, state, action, sample=False, return_dist=False):
+    def forward(self, state, action, sample=False, return_dist=False, delta=True):
         state, action = dtu.as_tensor(state, action)
 
         if len(state.shape) == 1:
@@ -45,6 +45,7 @@ class DynamicsNetwork(nn.Module):
         if len(action.shape) == 1:
             action = action[None, :]
 
+        # state comes in as (x, y, theta)
         input_state = self.dtu.state_to_model_input(state)
         state_action = torch.cat([input_state, action], dim=1).float()
         if self.scale:
@@ -63,13 +64,17 @@ class DynamicsNetwork(nn.Module):
         if self.scale:
             state_delta_model = self.unstandardize_output(state_delta_model)
 
-        return state_delta_model
+        if delta:
+            return state_delta_model
+
+        next_state_model = self.dtu.compute_next_state(state, state_delta_model)
+        return next_state_model
 
     def update(self, state, action, next_state):
         self.train()
         state, action, next_state = dtu.as_tensor(state, action, next_state)
 
-        state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
+        state_delta = self.dtu.compute_state_delta(state, next_state).detach()
 
         if self.dist:
             if self.scale:
@@ -91,7 +96,7 @@ class DynamicsNetwork(nn.Module):
         input_state = self.dtu.state_to_model_input(state)
 
         state_action = torch.cat([input_state, action], axis=1)
-        state_delta = self.dtu.state_delta_xysc(state, next_state)
+        state_delta = self.dtu.compute_state_delta(state, next_state)
 
         self.input_mean = state_action.mean(dim=0)
         self.input_std = state_action.std(dim=0)

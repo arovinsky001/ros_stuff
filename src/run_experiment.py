@@ -24,7 +24,7 @@ class Experiment():
     def __init__(self, robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
                  new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq, online, mpc_refine_iters,
                  pretrain_samples, random_steps, rate, use_all_data, debug, robot_pos, object_pos, corner_pos,
-                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, use_velocity, train_epochs, mpc_gamma,
+                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, train_epochs, mpc_gamma,
                  ensemble, batch_size):
         # flags for different stages of eval
         self.started = False
@@ -75,7 +75,6 @@ class Experiment():
         self.robot_goals = robot_goals
         self.scale = scale
         self.debug = debug
-        self.use_velocity = use_velocity
 
         self.all_actions = []
         self.costs = np.empty((0, 4))      # dist, heading, perp, total
@@ -85,7 +84,6 @@ class Experiment():
 
         if new_buffer or self.replay_buffer is None:
             state_dim = 6 if self.use_object else 3
-            state_dim *= 2 if self.use_velocity else 1
             self.replay_buffer = ReplayBuffer(capacity=100000, state_dim=state_dim, action_dim=2)
 
         if not self.debug:
@@ -155,7 +153,7 @@ class Experiment():
             self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=True, scale=self.scale,
                                   hidden_dim=200, hidden_depth=1, lr=0.001, dropout=0.0, std=0.1,
                                   ensemble=ensemble, use_object=self.use_object,
-                                  use_velocity=use_velocity, action_range=self.action_range)
+                                  action_range=self.action_range)
 
             if pretrain:
                 train_from_buffer(
@@ -220,15 +218,9 @@ class Experiment():
             object_pos = self.object_pos.copy()
             object_pos[2] = (object_pos[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
 
-            if self.use_velocity:
-                return np.concatenate((robot_pos, object_pos, self.robot_vel, self.object_vel), axis=0)
-            else:
-                return np.concatenate((robot_pos, object_pos), axis=0)
+            return np.concatenate((robot_pos, object_pos), axis=0)
         else:
-            if self.use_velocity:
-                return np.concatenate((robot_pos, self.robot_vel), axis=0)
-            else:
-                return robot_pos
+            return robot_pos
 
     def get_take_action(self, state):
         goal = self.get_goal()
@@ -427,7 +419,7 @@ def main():
                             args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
                             args.random_steps, args.rate, args.use_all_data, args.debug, robot_pos, object_pos,
                             corner_pos, robot_vel, object_vel, state_timestamp, args.save_agent, args.load_agent,
-                            args.use_velocity, args.train_epochs, args.mpc_gamma, args.ensemble, args.batch_size)
+                            args.train_epochs, args.mpc_gamma, args.ensemble, args.batch_size)
 
     experiment.run()
 
@@ -459,7 +451,6 @@ if __name__ == '__main__':
     parser.add_argument('-debug', action='store_true')
     parser.add_argument('-save_agent', action='store_true')
     parser.add_argument('-load_agent', action='store_true')
-    parser.add_argument('-use_velocity', action='store_true')
     parser.add_argument('-train_epochs', type=int, default=200)
     parser.add_argument('-ensemble', type=int, default=1)
     parser.add_argument('-batch_size', type=int, default=500)

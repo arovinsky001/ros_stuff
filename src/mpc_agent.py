@@ -9,29 +9,25 @@ from mpc_policies import MPPIPolicy, CEMPolicy, RandomShootingPolicy
 class MPCAgent:
     def __init__(self, seed=1, mpc_method='mppi', hidden_dim=512, hidden_depth=2, lr=7e-4,
                  dropout=0.5, std=0.02, dist=True, scale=True, ensemble=0, use_object=False,
-                 use_velocity=False, action_range=None, device=torch.device("cpu")):
+                 action_range=None, device=torch.device("cpu")):
         assert ensemble > 0
-        if use_object:
-            if use_velocity:
-                self.state_dim = 12
-                input_dim = 14
-                output_dim = 14
-            else:
-                self.state_dim = 6
-                input_dim = 8
-                output_dim = 8
-        else:
-            if use_velocity:
-                self.state_dim = 6
-                input_dim = 7
-                output_dim = 7
-            else:
-                self.state_dim = 3
-                input_dim = 4
-                output_dim = 4
+        action_dim = 2                              # left_pwm, right_pwm
+        robot_input_dim = 2                         # sin(yaw), cos(yaw)
+        object_input_dim = 3                        # x_to_robot, y_to_robot, yaw_to_robot
+        robot_output_dim = object_output_dim = 3    # x_delta, y_delta, yaw_delta
+        robot_pos_dim = object_pos_dim = 3          # x, y, yaw
 
-        self.dtu = dtu.DataUtils(use_object=use_object, use_velocity=use_velocity)
-        self.models = [DynamicsNetwork(input_dim, output_dim, dtu=self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
+        input_dim = action_dim + robot_input_dim
+        output_dim = robot_output_dim
+        self.state_dim = robot_pos_dim
+
+        if use_object:
+            input_dim += object_input_dim
+            output_dim += object_output_dim
+            self.state_dim += object_pos_dim
+
+        self.dtu = dtu.DataUtils(use_object=use_object)
+        self.models = [DynamicsNetwork(input_dim, output_dim, parent_dtu=self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
                                 for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
@@ -44,7 +40,7 @@ class MPCAgent:
             policy = RandomShootingPolicy
         else:
             raise NotImplementedError
-        self.policy = policy(action_dim=2, action_range=action_range, simulate_fn=self.simulate, cost_fn=self.compute_costs)
+        self.policy = policy(action_dim=action_dim, action_range=action_range, simulate_fn=self.simulate, cost_fn=self.compute_costs)
 
         self.seed = seed
         self.scale = scale
@@ -58,26 +54,6 @@ class MPCAgent:
     def get_action(self, state, prev_goal, goal, cost_weights, params):
         return self.policy.get_action(state, prev_goal, goal, cost_weights, params)
 
-    def get_prediction(self, state, action, model, sample=False, delta=False):
-        """
-        Accepts state [x, y, theta] or [x, y, theta, x, y, theta]
-        Returns next_state [x, y, theta] or [x, y, theta, x, y, theta]
-        """
-        model.eval()
-
-        with torch.no_grad():
-            state_delta_model = model(state, action, sample=sample)
-            next_state_model = self.dtu.compute_next_state(state, state_delta_model)
-
-        if delta:
-            return dtu.dcn(state_delta_model)
-
-        next_state_model[:, 2] %= 2 * np.pi
-        if self.use_object:
-            next_state_model[:, 5] %= 2 * np.pi
-
-        return dtu.dcn(next_state_model)
-
     def simulate(self, initial_state, action_sequence):
         n_samples, horizon, _ = action_sequence.shape
         initial_state = np.tile(initial_state, (n_samples, 1))
@@ -86,10 +62,11 @@ class MPCAgent:
         for i, model in enumerate(self.models):
             for t in range(horizon):
                 action = action_sequence[:, t]
-                if t == 0:
-                    state_sequence[i, :, t] = self.get_prediction(initial_state, action, model)
-                else:
-                    state_sequence[i, :, t] = self.get_prediction(state_sequence[i, :, t-1], action, model)
+                with torch.no_grad():
+                    if t == 0:
+                        state_sequence[i, :, t] = model(initial_state, action, sample=False, delta=False)
+                    else:
+                        state_sequence[i, :, t] = model(state_sequence[i, :, t-1], action, sample=False, delta=False)
 
         return state_sequence
 
@@ -102,7 +79,7 @@ class MPCAgent:
 
             effective_state = robot_state if robot_goals else object_state
         else:
-            effective_state = state[:, :, :, :3]     # ignore velocity
+            effective_state = state[:, :, :, :3]
             sep_cost = np.array([0.])
 
         x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
