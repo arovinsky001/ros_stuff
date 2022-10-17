@@ -89,7 +89,6 @@ class StatePublisher:
         os = pub_msg.object_state = SingleState()
         cs = pub_msg.corner_state = SingleState()
 
-        # robot_pos, object_pos, corner_pos = self.compute_pos_from_past_states()
         robot_pos = self.id_to_state[self.name_to_id["robot"]].copy()
         object_pos = self.id_to_state[self.name_to_id["object"]].copy()
         corner_pos = self.id_to_state[self.name_to_id["corner"]].copy()
@@ -106,20 +105,6 @@ class StatePublisher:
         pub_msg.header.stamp = rospy.Time.now()
 
         self.publisher.publish(pub_msg)
-
-    # def compute_pos_from_past_states(self):
-    #     positions = []
-    #     for name in ["robot", "object", "corner"]:
-    #         past_states = self.id_to_past_states_stamped[self.name_to_id[name]]
-
-    #         xy_mean = past_states[:, :2].mean(axis=0)
-
-    #         sin_yaw, cos_yaw = np.sin(past_states[:, 2]), np.cos(past_states[:, 2])
-    #         yaw_mean = np.arctan2(sin_yaw.mean(keepdims=True), cos_yaw.mean(keepdims=True)) % (2 * np.pi)
-    #         pos_mean = np.concatenate((xy_mean, yaw_mean), axis=0)
-    #         positions.append(pos_mean)
-
-    #     return positions
 
     def compute_vel_from_past_states(self):
         velocities = []
