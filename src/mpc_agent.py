@@ -5,7 +5,7 @@ import torch
 
 from dynamics_network import DynamicsNetwork
 from mpc_policies import MPPIPolicy, CEMPolicy, RandomShootingPolicy
-from data_utils import DataUtils, signed_angle_difference, dimensions,
+from data_utils import DataUtils, signed_angle_difference, dimensions
 
 
 class MPCAgent:
