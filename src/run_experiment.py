@@ -6,7 +6,7 @@ import pickle as pkl
 import numpy as np
 import rospy
 
-from real_mpc_dynamics import *
+from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import AGENT_PATH, train_from_buffer
