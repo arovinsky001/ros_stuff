@@ -22,11 +22,11 @@ np.random.seed(SEED)
 
 
 class Experiment():
-    def __init__(self, robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time, calibrate, plot,
-                 new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq, online, mpc_refine_iters,
-                 pretrain_samples, random_steps, rate, use_all_data, debug, robot_pos, object_pos, corner_pos,
-                 robot_vel, object_vel, state_timestamp, save_agent, load_agent, train_epochs, mpc_gamma,
-                 ensemble, batch_size):
+    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, state_timestamp,
+                 robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
+                 calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
+                 online, mpc_refine_iters, pretrain_samples, random_steps, rate, use_all_data, debug,
+                 save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, robot_theta):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -154,7 +154,7 @@ class Experiment():
             self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=True, scale=self.scale,
                                   hidden_dim=200, hidden_depth=1, lr=0.001, dropout=0.0, std=0.1,
                                   ensemble=ensemble, use_object=self.use_object,
-                                  action_range=self.action_range)
+                                  action_range=self.action_range, robot_theta=robot_theta)
 
             if pretrain:
                 train_from_buffer(
@@ -414,14 +414,7 @@ def main():
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    experiment = Experiment(args.robot_id, args.object_id, args.mpc_horizon, args.mpc_samples,
-                            args.n_rollouts, args.tolerance, args.lap_time, args.calibrate, args.plot,
-                            args.new_buffer, args.pretrain, args.robot_goals, args.scale, args.mpc_method,
-                            args.save_freq, args.online, args.mpc_refine_iters, args.pretrain_samples,
-                            args.random_steps, args.rate, args.use_all_data, args.debug, robot_pos, object_pos,
-                            corner_pos, robot_vel, object_vel, state_timestamp, args.save_agent, args.load_agent,
-                            args.train_epochs, args.mpc_gamma, args.ensemble, args.batch_size)
-
+    experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, state_timestamp, **vars(args))
     experiment.run()
 
 
@@ -455,6 +448,7 @@ if __name__ == '__main__':
     parser.add_argument('-train_epochs', type=int, default=200)
     parser.add_argument('-ensemble', type=int, default=1)
     parser.add_argument('-batch_size', type=int, default=500)
+    parser.add_argument('-robot_theta', action='store_true')
 
     args = parser.parse_args()
     main(args)

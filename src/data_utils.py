@@ -44,8 +44,9 @@ def signed_angle_difference(diff):
 
 
 class DataUtils:
-    def __init__(self, use_object=False):
+    def __init__(self, use_object=False, robot_theta=False):
         self.use_object = use_object
+        self.robot_theta = robot_theta
 
     def state_to_model_input(self, state):
         state = as_tensor(state)
@@ -59,9 +60,15 @@ class DataUtils:
             object_to_robot = robot_state - object_state
             object_to_robot[:, yaw_idx] = signed_angle_difference(object_to_robot[:, yaw_idx])
 
-            full_state = torch.cat((robot_sc, object_to_robot), dim=1)
+            if self.robot_theta:
+                full_state = torch.cat((robot_state[:, yaw_idx, None], object_to_robot), dim=1)
+            else:
+                full_state = torch.cat((robot_sc, object_to_robot), dim=1)
         else:
-            full_state = robot_sc
+            if self.robot_theta:
+                full_state = robot_state[:, yaw_idx, None]
+            else:
+                full_state = robot_sc
 
         return full_state
 

@@ -11,10 +11,14 @@ from data_utils import DataUtils, signed_angle_difference, dimensions
 class MPCAgent:
     def __init__(self, seed=1, mpc_method='mppi', hidden_dim=512, hidden_depth=2, lr=7e-4,
                  dropout=0.5, std=0.02, dist=True, scale=True, ensemble=0, use_object=False,
-                 action_range=None, device=torch.device("cpu")):
+                 action_range=None, device=torch.device("cpu"), robot_theta=False):
         assert ensemble > 0
 
-        input_dim = dimensions["action_dim"] + dimensions["robot_input_dim"]
+        if robot_theta:
+            input_dim = dimensions["action_dim"] + 1
+        else:
+            input_dim = dimensions["action_dim"] + dimensions["robot_input_dim"]
+
         output_dim = dimensions["robot_output_dim"]
         self.state_dim = dimensions["state_dim"]
 
@@ -23,7 +27,7 @@ class MPCAgent:
             output_dim += dimensions["object_output_dim"]
             self.state_dim += dimensions["state_dim"]
 
-        self.dtu = DataUtils(use_object=use_object)
+        self.dtu = DataUtils(use_object=use_object, robot_theta=robot_theta)
         self.models = [DynamicsNetwork(input_dim, output_dim, self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, dropout=dropout, std=std, dist=dist, use_object=use_object, scale=scale)
                                 for _ in range(ensemble)]
         for model in self.models:
