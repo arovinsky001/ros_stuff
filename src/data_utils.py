@@ -1,6 +1,7 @@
+#!/usr/bin/python3
+
 import numpy as np
 import torch
-from pdb import set_trace
 
 # GENERAL PYTORCH UTILS
 
