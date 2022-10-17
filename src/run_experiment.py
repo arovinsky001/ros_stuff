@@ -10,6 +10,7 @@ from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import AGENT_PATH, train_from_buffer
+from data_utils import dimensions
 
 from ros_stuff.msg import RobotCmd, ProcessedStates
 from ros_stuff.srv import CommandAction
@@ -83,8 +84,8 @@ class Experiment():
         self.replay_buffer = self.logger.load_buffer()
 
         if new_buffer or self.replay_buffer is None:
-            state_dim = 6 if self.use_object else 3
-            self.replay_buffer = ReplayBuffer(capacity=100000, state_dim=state_dim, action_dim=2)
+            state_dim = 2 * dimensions["state_dim"] if self.use_object else dimensions["state_dim"]
+            self.replay_buffer = ReplayBuffer(capacity=100000, state_dim=state_dim, action_dim=dimensions["action_dim"])
 
         if not self.debug:
             print(f"waiting for robot {self.robot_id} service")

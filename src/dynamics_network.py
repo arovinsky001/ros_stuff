@@ -8,7 +8,7 @@ import data_utils as dtu
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, parent_dtu=None, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
+    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth >= 1
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
@@ -28,10 +28,7 @@ class DynamicsNetwork(nn.Module):
         self.input_scaler = None
         self.output_scaler = None
         self.net.apply(self._init_weights)
-        if parent_dtu is None:
-            self.dtu = dtu.DataUtils(use_object=use_object)
-        else:
-            self.dtu = parent_dtu
+        self.dtu = global_dtu
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

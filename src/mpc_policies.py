@@ -1,11 +1,12 @@
 #!/usr/bin/python3
 
 import numpy as np
+from data_utils import dimensions
 
 
 class MPCPolicy:
-    def __init__(self, action_dim=2, action_range=None, simulate_fn=None, cost_fn=None):
-        self.action_dim = action_dim
+    def __init__(self, action_range=None, simulate_fn=None, cost_fn=None):
+        self.action_dim = dimensions["action_dim"]
         self.simulate = simulate_fn
         self.compute_costs = cost_fn
         if action_range is None:
