@@ -241,7 +241,9 @@ class Experiment():
             self.time_elapsed += self.duration if self.started else 0
         else:
             print("TAKING RANDOM ACTION")
-            action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
+            action = np.random.normal(loc=0, scale=0.7, size=dimensions["action_dim"])
+            action = np.clip(action, *self.action_range)
+            # action = np.random.uniform(*self.action_range, size=(1, self.action_range.shape[-1])).squeeze()
 
         action = np.clip(action, *self.action_range)
         action_req = RobotCmd()
@@ -368,7 +370,7 @@ class Experiment():
             self.time_elapsed = 0.
             self.started = False
 
-            self.logger.plot_states(self.corner_pos, save=True, laps=self.laps)
+            self.logger.plot_states(self.corner_pos, save=True, laps=self.laps, replay_buffer=self.replay_buffer)
             self.logger.log_performance_metrics(self.costs, self.all_actions)
 
             if self.online:

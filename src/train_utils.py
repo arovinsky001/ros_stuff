@@ -40,7 +40,7 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
     print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
     print("MIN TEST LOSS:", test_losses.min())
 
-    state_delta = agent.dtu.compute_state_delta(states, next_states)
+    state_delta = agent.dtu.state_delta_xysc(states, next_states)
 
     test_state, test_action = states[test_idx], actions[test_idx]
     test_state_delta = dtu.dcn(state_delta[test_idx])
@@ -86,7 +86,7 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
     for k, model in enumerate(agent.models):
         train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=agent.seed + k)
         test_state, test_action, test_next_state = state[test_idx], action[test_idx], next_state[test_idx]
-        test_state_delta = agent.dtu.compute_state_delta(test_state, test_next_state)
+        test_state_delta = agent.dtu.state_delta_xysc(test_state, test_next_state)
 
         if use_all_data:
             train_idx = all_idx
