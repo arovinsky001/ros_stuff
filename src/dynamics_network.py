@@ -15,7 +15,7 @@ class DynamicsNetwork(nn.Module):
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-            hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
+            # hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)

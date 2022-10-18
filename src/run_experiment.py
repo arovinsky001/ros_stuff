@@ -77,10 +77,13 @@ class Experiment():
         self.scale = scale
         self.debug = debug
 
+        if not robot_goals:
+            assert self.use_object
+
         self.all_actions = []
         self.costs = np.empty((0, 4))      # dist, heading, perp, total
 
-        self.logger = Logger(use_object=self.use_object, plot=plot)
+        self.logger = Logger(self, plot)
         self.replay_buffer = self.logger.load_buffer()
 
         if new_buffer or self.replay_buffer is None:
@@ -188,7 +191,8 @@ class Experiment():
             print("TIME:", rospy.get_time() - t)
 
             next_state = self.get_state()
-            self.collect_training_data(state, action, next_state)
+            if not self.debug:
+                self.collect_training_data(state, action, next_state)
             if self.started:
                 self.all_actions.append(action.tolist())
 
@@ -212,6 +216,9 @@ class Experiment():
         return state, action
 
     def get_state(self):
+        if np.any(self.robot_pos[:2] > self.corner_pos[:2]) or np.any(self.robot_pos[:2] < 0):
+            import pdb;pdb.set_trace()
+
         robot_pos = self.robot_pos.copy()
         robot_pos[2] = (robot_pos[2] + self.yaw_offsets[self.robot_id]) % (2 * np.pi)
 
@@ -225,7 +232,7 @@ class Experiment():
 
     def get_take_action(self, state):
         goal = self.get_goal()
-        state_for_prev_goal = state[:3] if self.robot_goals else state[3:]
+        state_for_prev_goal = state[:dimensions["state_dim"]] if self.robot_goals else state[dimensions["state_dim"]:]
         prev_goal = self.prev_goal if self.started else state_for_prev_goal
         prev_goal = state_for_prev_goal
 
@@ -361,7 +368,7 @@ class Experiment():
             self.time_elapsed = 0.
             self.started = False
 
-            self.logger.plot_states(save=True)
+            self.logger.plot_states(self.corner_pos, save=True, laps=self.laps)
             self.logger.log_performance_metrics(self.costs, self.all_actions)
 
             if self.online:
@@ -385,7 +392,7 @@ class Experiment():
                     states, actions, next_states = self.replay_buffer.sample(self.batch_size)
                     model.update(states, actions, next_states)
 
-def main():
+def main(args):
     rospy.init_node("laptop_client_mpc")
 
     pos_dim = 3
