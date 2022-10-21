@@ -115,7 +115,7 @@ class DynamicsNetwork(nn.Module):
         self.train()
         state, action, next_state = dtu.as_tensor(state, action, next_state)
 
-        state_delta = self.dtu.compute_state_delta(state, next_state).detach()
+        state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
 
         if self.dist:
             if self.scale:
@@ -193,7 +193,7 @@ class DynamicsNetwork(nn.Module):
         input_state = self.dtu.state_to_model_input(state)
 
         state_action = torch.cat([input_state, action], axis=1)
-        state_delta = self.dtu.compute_state_delta(state, next_state)
+        state_delta = self.dtu.state_delta_xysc(state, next_state)
 
         self.input_mean = state_action.mean(dim=0)
         self.input_std = state_action.std(dim=0)

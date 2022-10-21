@@ -9,14 +9,14 @@ import csv
 
 
 class Logger:
-    def __init__(self, use_object=False, plot=False):
-        exp_title = f"{'robot' if self.robot_goals else 'object'}goals"
-        if self.pretrain or self.load_agent:
-            exp_title += f"_pretrain{self.pretrain_samples}"
-        if self.online:
+    def __init__(self, experiment, plot):
+        exp_title = f"{'robot' if experiment.robot_goals else 'object'}goals"
+        if experiment.pretrain or experiment.load_agent:
+            exp_title += f"_pretrain{experiment.pretrain_samples}"
+        if experiment.online:
             exp_title += "_online"
 
-        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if use_object else 'robot'}/{exp_title}/"
+        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if experiment.use_object else 'robot'}/{exp_title}/"
         self.buffer_path = "/home/bvanbuskirk/Desktop/experiments/buffers/"
         self.plot_path = self.exp_path + "plots/"
         self.state_path = self.exp_path + "states/"
@@ -30,8 +30,10 @@ class Logger:
         self.robot_states = []
         self.object_states = []
         self.goal_states = []
+
+        self.use_object = experiment.use_object
         self.plot = plot
-        self.use_object = use_object
+        self.logged_costs = self.logged_actions = False
 
     def log_performance_metrics(self, costs, actions):
         dist_costs, heading_costs, perp_costs, total_costs = costs.T
@@ -48,7 +50,13 @@ class Logger:
         self.log_actions(actions)
 
     def log_costs(self, dist_costs, heading_costs, total_costs, costs_np):
-        with open(self.exp_path + "costs.csv", "a", newline="") as csvfile:
+        if not self.logged_costs:
+            write_option = "w"
+            self.logged_costs = True
+        else:
+            write_option = "a"
+
+        with open(self.exp_path + "costs.csv", write_option, newline="") as csvfile:
             fwriter = csv.writer(csvfile, delimiter=',')
             for total_loss, dist_loss, heading_loss in zip(total_costs, dist_costs, heading_costs):
                 fwriter.writerow([total_loss, dist_loss, heading_loss])
@@ -58,7 +66,13 @@ class Logger:
             np.save(f, costs_np)
 
     def log_actions(self, actions):
-        with open(self.exp_path + "actions.csv", "a", newline="") as csvfile:
+        if not self.logged_actions:
+            write_option = "w"
+            self.logged_actions = True
+        else:
+            write_option = "a"
+
+        with open(self.exp_path + "actions.csv", write_option, newline="") as csvfile:
             fwriter = csv.writer(csvfile, delimiter=',')
             for action in actions:
                 fwriter.writerow(action)
@@ -83,12 +97,12 @@ class Logger:
     def load_buffer(self):
         pkl_path = self.buffer_path + f"{'object' if self.use_object else 'robot'}_buffer.pkl"
         if os.path.exists(pkl_path):
-            with open(pkl_path) as f:
+            with open(pkl_path, 'rb') as f:
                 return pkl.load(f)
         else:
             return None
 
-    def plot_states(self, save=False):
+    def plot_states(self, corners, save=False, laps=None, replay_buffer=None):
         plot_goals = np.array(self.goal_states)
         plot_robot_states = np.array(self.robot_states)
         plot_object_states = np.array(self.object_states)
@@ -97,8 +111,8 @@ class Logger:
         plt.plot(plot_object_states[:, 0], plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
 
         if len(self.goal_states) == 1 or not self.plot:
-            plt.xlim((self.corner_pos[0], 0))
-            plt.ylim((self.corner_pos[1], 0))
+            plt.xlim((corners[0], 0))
+            plt.ylim((corners[1], 0))
             plt.legend()
             plt.ion()
             plt.show()
@@ -107,11 +121,11 @@ class Logger:
         plt.pause(0.0001)
 
         if save:
-            plt.savefig(self.plot_path + f"lap{self.laps}_rb{self.replay_buffer.size}.png")
-            plt.pause(5.)
+            plt.savefig(self.plot_path + f"lap{laps}_rb{replay_buffer.size}.png")
+            plt.pause(4.)
             plt.close()
 
             state_dict = {"robot": plot_robot_states, "object": plot_object_states, "goal": plot_goals}
             for name in ["robot", "object", "goal"]:
-                with open(self.state_path + f"/{name}_lap{self.laps}.npy", "wb") as f:
+                with open(self.state_path + f"/{name}_lap{laps}.npy", "wb") as f:
                     np.save(f, state_dict[name])

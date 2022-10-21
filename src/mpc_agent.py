@@ -99,6 +99,8 @@ class MPCAgent:
 
         if signed:
             heading_cost *= left * forward
+        else:
+            heading_cost = np.abs(heading_cost)
 
         # dist cost
         dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
