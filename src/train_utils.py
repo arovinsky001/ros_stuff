@@ -107,7 +107,7 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
 
         with torch.no_grad():
             model.eval()
-            pred_state_delta = model(test_state, test_action, sample=False)
+            pred_state_delta = model(test_state, test_action, sample=False, delta=True)
             test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
         test_losses.append(dtu.dcn(test_loss_mean))
@@ -131,7 +131,7 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
 
             with torch.no_grad():
                 model.eval()
-                pred_state_delta = model(test_state, test_action, sample=False)
+                pred_state_delta = model(test_state, test_action, sample=False, delta=True)
                 test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
             train_losses.append(train_loss_mean)

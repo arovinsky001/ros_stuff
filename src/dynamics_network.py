@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+from matplotlib import test
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -8,14 +9,14 @@ import data_utils as dtu
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=256, hidden_depth=2, lr=1e-3, dropout=0.5, std=0.02, dist=True, use_object=False, scale=True):
+    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=256, hidden_depth=2, lr=1e-3, std=0.01, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth >= 1
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-            hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
+            # hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
@@ -28,7 +29,7 @@ class DynamicsNetwork(nn.Module):
         self.output_scaler = None
         self.net.apply(self._init_weights)
         self.dtu = global_dtu
-        self.update_lr = torch.tensor(lr)
+        self.update_lr = nn.parameter.Parameter(torch.tensor(lr))
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=lr)
@@ -39,7 +40,7 @@ class DynamicsNetwork(nn.Module):
             if hasattr(m.bias, 'data'):
                 m.bias.data.fill_(0.0)
 
-    def forward(self, states, actions, sample=False, return_dist=False, delta=True):
+    def forward(self, states, actions, sample=False, return_dist=False, delta=False):
         states, actions = dtu.as_tensor(states, actions)
 
         if len(states.shape) == 1:
@@ -72,7 +73,7 @@ class DynamicsNetwork(nn.Module):
         next_states_model = self.dtu.compute_next_state(states, state_deltas_model)
         return next_states_model
 
-    def forward_from_params(self, updated_params, states, actions, sample=False, return_dist=False, delta=True):
+    def forward_from_params(self, updated_params, states, actions, sample=False, return_dist=False, delta=False):
         states, actions = dtu.as_tensor(states, actions)
 
         if len(states.shape) == 1:
@@ -87,7 +88,7 @@ class DynamicsNetwork(nn.Module):
             x = self.standardize_input(x)
 
         for i in range(self.hidden_depth + 1):
-            w, b = updated_params[2*(i+1)], updated_params[2*(i+1)+1]
+            w, b = updated_params[2*i], updated_params[2*i+1]
             x = F.relu(F.linear(x, w, b))
 
         w, b = updated_params[-2], updated_params[-1]
@@ -123,7 +124,7 @@ class DynamicsNetwork(nn.Module):
             dist = self(state, action, return_dist=True)
             loss = -dist.log_prob(state_delta).mean()
         else:
-            pred_state_delta = self(state, action)
+            pred_state_delta = self(state, action, delta=True)
             loss = F.mse_loss(pred_state_delta, state_delta, reduction='mean')
 
         self.optimizer.zero_grad()
@@ -135,7 +136,7 @@ class DynamicsNetwork(nn.Module):
     def update_meta(self, state, action, next_state):
         self.train()
         state, action, next_state = dtu.as_tensor(state, action, next_state)
-        state_delta = self.dtu.compute_state_delta(state_delta)
+        state_delta = self.dtu.state_delta_xysc(state, next_state)
 
         # chunk into "tasks" i.e. batches continuous in time
         tasks = 10
@@ -143,9 +144,12 @@ class DynamicsNetwork(nn.Module):
         batched_states = torch.stack(state.chunk(tasks, dim=0))
         batched_actions = torch.stack(action.chunk(tasks, dim=0))
         batched_state_deltas = torch.stack(state_delta.chunk(tasks, dim=0))
-        test_losses = 0
+        test_loss_sum = 0
 
-        for i in tasks:
+        if self.dist and self.scale:
+            batched_state_deltas = self.standardize_output(batched_state_deltas)
+
+        for i in range(tasks):
             train_states, test_states = batched_states[i].chunk(2, dim=0)
             train_actions, test_actions = batched_actions[i].chunk(2, dim=0)
             train_state_deltas, test_state_deltas = batched_state_deltas[i].chunk(2, dim=0)
@@ -153,40 +157,51 @@ class DynamicsNetwork(nn.Module):
             for j in range(meta_update_steps):
                 # compute prediction and corresponding training loss
                 if self.dist:
-                    if self.scale:
-                        train_state_deltas = self.standardize_output(train_state_deltas)
-                        test_state_deltas = self.standardize_output(test_state_deltas)
-                    dist = self(train_states, train_actions, return_dist=True)
+                    if j == 0:
+                        dist = self(train_states, train_actions, return_dist=True)
+                    else:
+                        dist = self.forward_from_params(updated_params, train_states, train_actions, return_dist=True)
                     loss = -dist.log_prob(train_state_deltas).mean()
                 else:
-                    pred_state_delta = self(train_states, train_actions)
-                    loss = F.mse_loss(pred_state_delta, train_state_deltas, reduction='mean')
+                    if j == 0:
+                        pred_state_deltas = self(train_states, train_actions, delta=True)
+                    else:
+                        pred_state_deltas = self.forward_from_params(updated_params, train_states, train_actions, delta=True)
+                    loss = F.mse_loss(pred_state_deltas, train_state_deltas, reduction='mean')
 
                 # compute gradient and simulate gradient step
                 params = self.net.parameters() if j == 0 else updated_params
                 grad = torch.autograd.grad(loss, params)
+                params = self.net.parameters() if j == 0 else updated_params
                 updated_params = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, params)))
 
-                # only consider last-step losses for main network update
-                if j == meta_update_steps - 1:
-                    if self.dist:
-                        test_dist = self.forward_from_params(updated_params, test_states, test_actions, return_dist=True)
-                        test_losses -= test_dist.log_prob(test_state_deltas)
-                    else:
-                        pred_state_delta = self.forward_from_params(updated_params, test_states, test_actions)
-                        test_losses += F.mse_loss(pred_state_delta, test_state_deltas)
+                for k, p in enumerate(updated_params):
+                    if torch.any(torch.isnan(p)) or torch.any(torch.isinf(p)):
+                        import pdb;pdb.set_trace()
+
+            # only consider last-step losses for main network update
+            if self.dist:
+                test_dist = self.forward_from_params(updated_params, test_states, test_actions, return_dist=True)
+                test_loss_sum -= test_dist.log_prob(test_state_deltas).mean()
+            else:
+                pred_state_deltas = self.forward_from_params(updated_params, test_states, test_actions)
+                test_loss_sum += F.mse_loss(pred_state_deltas, test_state_deltas)
+
+        loss = test_loss_sum / tasks
 
         # update network
         self.optimizer.zero_grad()
-        test_losses.backward(retain_graph=True)
+        loss.backward(retain_graph=True)
         self.optimizer.step()
 
         # update learning rate
         self.lr_optimizer.zero_grad()
-        test_losses.backward()
-        self.lr_optimizer.zero_grad()
+        loss.backward()
+        self.lr_optimizer.step()
 
-        return dtu.dcn(test_losses)
+        print(self.update_lr)
+
+        return dtu.dcn(test_loss_sum)
 
     def set_scalers(self, state, action, next_state):
         state, action, next_state = dtu.as_tensor(state, action, next_state)
