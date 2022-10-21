@@ -26,7 +26,8 @@ class Experiment():
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, random_steps, rate, use_all_data, debug,
-                 save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, robot_theta, **kwargs):
+                 save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, robot_theta,
+                 meta, **kwargs):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -76,6 +77,7 @@ class Experiment():
         self.robot_goals = robot_goals
         self.scale = scale
         self.debug = debug
+        self.meta = meta
 
         self.all_actions = []
         self.costs = np.empty((0, 4))      # dist, heading, perp, total
@@ -161,6 +163,7 @@ class Experiment():
                     self.agent, self.replay_buffer, pretrain=pretrain,
                     pretrain_samples=pretrain_samples, save_agent=save_agent,
                     train_epochs=train_epochs, use_all_data=use_all_data, batch_size=batch_size,
+                    meta=meta,
                 )
 
         np.set_printoptions(suppress=True)
@@ -197,7 +200,7 @@ class Experiment():
             train_from_buffer(
                 self.agent, self.replay_buffer, save_agent=self.save_agent,
                 train_epochs=self.train_epochs, use_all_data=self.use_all_data,
-                batch_size=self.batch_size,
+                batch_size=self.batch_size, meta=self.meta,
             )
 
         state = self.get_state()
@@ -449,6 +452,7 @@ if __name__ == '__main__':
     parser.add_argument('-ensemble', type=int, default=1)
     parser.add_argument('-batch_size', type=int, default=500)
     parser.add_argument('-robot_theta', action='store_true')
+    parser.add_argument('-meta', action='store_true')
 
     args = parser.parse_args()
     main(args)

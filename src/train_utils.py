@@ -15,7 +15,7 @@ AGENT_PATH = "/home/bvanbuskirk/Desktop/experiments/agent.pkl"
 
 
 def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500, save_agent=False,
-                     train_epochs=100, use_all_data=False, batch_size=500):
+                     train_epochs=100, use_all_data=False, batch_size=500, meta=False):
     if pretrain:
         n_samples = min(pretrain_samples, replay_buffer.size)
 
@@ -27,7 +27,7 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
 
     training_losses, test_losses, test_idx = train(
             agent, states, actions, next_states, set_scalers=True, epochs=train_epochs,
-            batch_size=batch_size, use_all_data=use_all_data
+            batch_size=batch_size, use_all_data=use_all_data, meta=meta
     )
 
     if save_agent:
@@ -77,14 +77,18 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
 
     plt.show()
 
-def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False):
+def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False, meta=False):
     state, action, next_state = dtu.as_tensor(state, action, next_state)
 
     n_test = int(len(state) * 0.1)
     all_idx = torch.arange(len(state))
 
     for k, model in enumerate(agent.models):
-        train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=agent.seed + k)
+        if meta:
+            train_idx, test_idx = all_idx[:-n_test], all_idx[-n_test:]
+        else:
+            train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=agent.seed + k)
+
         test_state, test_action, test_next_state = state[test_idx], action[test_idx], next_state[test_idx]
         test_state_delta = agent.dtu.compute_state_delta(test_state, test_next_state)
 
@@ -111,13 +115,19 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
 
         print("\n\nTRAINING MODEL\n")
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
-            random_idx = np.random.permutation(len(train_state))
-            train_state, train_action, train_next_state = train_state[random_idx], train_action[random_idx], train_next_state[random_idx]
+            if meta:
+                shuffle_idx = train_idx
+            else:
+                shuffle_idx = np.random.permutation(len(train_state))
+            train_state, train_action, train_next_state = train_state[shuffle_idx], train_action[shuffle_idx], train_next_state[shuffle_idx]
 
-            for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
-                start, end = j * batch_size, (j + 1) * batch_size
-                batch_state, batch_action, batch_next_state = train_state[start:end], train_action[start:end], train_next_state[start:end]
-                train_loss_mean = model.update(batch_state, batch_action, batch_next_state)
+            if meta:
+                train_loss_mean = model.update_meta(train_state, train_action, train_next_state)
+            else:
+                for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
+                    start, end = j * batch_size, (j + 1) * batch_size
+                    batch_state, batch_action, batch_next_state = train_state[start:end], train_action[start:end], train_next_state[start:end]
+                    train_loss_mean = model.update(batch_state, batch_action, batch_next_state)
 
             with torch.no_grad():
                 model.eval()
