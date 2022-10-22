@@ -19,9 +19,12 @@ class MPCPolicy:
 
         ensemble_costs = np.zeros(predicted_state_sequence.shape[:-1])
         for cost_type in cost_dict:
-            if cost_type != "distance":
-                ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
-        ensemble_costs = (ensemble_costs + cost_weights_dict["distance"]) * cost_dict["distance"]
+            ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
+
+        # for cost_type in cost_dict:
+        #     if cost_type != "distance":
+        #         ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
+        # ensemble_costs = (ensemble_costs + cost_weights_dict["distance"]) * cost_dict["distance"]
 
         # discount costs through time
         # discount = 0.9 ** np.arange(horizon)

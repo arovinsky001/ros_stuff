@@ -44,7 +44,7 @@ def signed_angle_difference(diff):
 
 
 class DataUtils:
-    def __init__(self, use_object=False, robot_theta=False):
+    def __init__(self, use_object=False):
         self.use_object = use_object
 
     def state_to_xysc(self, state):

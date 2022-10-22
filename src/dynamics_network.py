@@ -9,7 +9,7 @@ import data_utils as dtu
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=256, hidden_depth=2, lr=1e-3, std=0.01, dist=True, use_object=False, scale=True):
+    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=200, hidden_depth=1, lr=0.001, std=0.01, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
         assert hidden_depth >= 1
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
@@ -118,6 +118,36 @@ class DynamicsNetwork(nn.Module):
 
         state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
 
+        ### TEMP ###
+        offsets_per_sample = 40
+        heading_offset = torch.rand(offsets_per_sample) * 2 * torch.pi
+        offset_state = state.repeat(1, offsets_per_sample).reshape(len(state), offsets_per_sample, -1)
+        offset_state[:, :, 2] = (offset_state[:, :, 2] + heading_offset) % (2 * torch.pi)
+
+        sin, cos = torch.sin(heading_offset), torch.cos(heading_offset)
+        rotation = torch.stack((torch.stack((cos, -sin)),
+                                torch.stack((sin, cos)))).transpose(0, 2)
+        tmp = rotation[:, 0, 1].clone()
+        rotation[:, 0, 1] = rotation[:, 1, 0].clone()
+        rotation[:, 1, 0] = tmp
+        offset_state_delta = state_delta.repeat(1, offsets_per_sample).reshape(len(state_delta), offsets_per_sample, -1)
+        offset_state_delta[:, :, :2] = (rotation @ offset_state_delta[:, :, :2, None]).squeeze()
+
+        state_offset_heading = offset_state[:, :, 2].reshape(-1)
+        next_state_repeat = next_state.repeat(1, offsets_per_sample).reshape(len(next_state), offsets_per_sample, -1)
+        next_state_offset_heading = ((next_state_repeat[:, :, 2] + heading_offset) % (2 * torch.pi)).reshape(-1)
+        offset_sin, offset_cos = torch.sin(state_offset_heading), torch.cos(state_offset_heading)
+        next_offset_sin, next_offset_cos = torch.sin(next_state_offset_heading), torch.cos(next_state_offset_heading)
+        sin_delta, cos_delta = next_offset_sin - offset_sin, next_offset_cos - offset_cos
+
+        state = offset_state.reshape(-1, state.shape[-1])
+        state_delta = offset_state_delta.reshape(-1, state_delta.shape[-1])
+        action = action.repeat(1, offsets_per_sample).reshape(-1, action.shape[-1])
+
+        state_delta[:, 2] = sin_delta
+        state_delta[:, 3] = cos_delta
+        ### TEMP ###
+
         if self.dist:
             if self.scale:
                 state_delta = self.standardize_output(state_delta)
@@ -140,10 +170,14 @@ class DynamicsNetwork(nn.Module):
 
         # chunk into "tasks" i.e. batches continuous in time
         tasks = 10
-        meta_update_steps = 3
-        batched_states = torch.stack(state.chunk(tasks, dim=0))
-        batched_actions = torch.stack(action.chunk(tasks, dim=0))
-        batched_state_deltas = torch.stack(state_delta.chunk(tasks, dim=0))
+        meta_update_steps = 2
+
+        data_len = len(state) - len(state) % tasks
+        state = state[:]
+
+        batched_states = torch.stack(state[:data_len].chunk(tasks, dim=0))
+        batched_actions = torch.stack(action[:data_len].chunk(tasks, dim=0))
+        batched_state_deltas = torch.stack(state_delta[:data_len].chunk(tasks, dim=0))
         test_loss_sum = 0
 
         if self.dist and self.scale:
@@ -198,8 +232,6 @@ class DynamicsNetwork(nn.Module):
         self.lr_optimizer.zero_grad()
         loss.backward()
         self.lr_optimizer.step()
-
-        print(self.update_lr)
 
         return dtu.dcn(test_loss_sum)
 

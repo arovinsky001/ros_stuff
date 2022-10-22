@@ -9,16 +9,12 @@ from data_utils import DataUtils, signed_angle_difference, dimensions
 
 
 class MPCAgent:
-    def __init__(self, seed=1, mpc_method='mppi', hidden_dim=200, hidden_depth=1, lr=7e-4,
-                 std=0.01, dist=True, scale=True, ensemble=1, use_object=False,
-                 action_range=None, device=torch.device("cpu"), robot_theta=False):
+    def __init__(self, seed=1, mpc_method='mppi', hidden_dim=200, hidden_depth=2, lr=0.001,
+                 std=0.01, dist=True, scale=True, ensemble=0, use_object=False,
+                 action_range=None, device=torch.device("cpu")):
         assert ensemble > 0
 
-        if robot_theta:
-            input_dim = dimensions["action_dim"] + 1
-        else:
-            input_dim = dimensions["action_dim"] + dimensions["robot_input_dim"]
-
+        input_dim = dimensions["action_dim"] + dimensions["robot_input_dim"]
         output_dim = dimensions["robot_output_dim"]
         self.state_dim = dimensions["state_dim"]
 
@@ -27,7 +23,7 @@ class MPCAgent:
             output_dim += dimensions["object_output_dim"]
             self.state_dim += dimensions["state_dim"]
 
-        self.dtu = DataUtils(use_object=use_object, robot_theta=robot_theta)
+        self.dtu = DataUtils(use_object=use_object)
         self.models = [DynamicsNetwork(input_dim, output_dim, self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, std=std, dist=dist, use_object=use_object, scale=scale)
                                 for _ in range(ensemble)]
         for model in self.models:
@@ -87,6 +83,11 @@ class MPCAgent:
         x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
         vec_to_goal = (goal - effective_state)[:, :, :, :-1]
 
+        # dist cost
+        dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
+        if signed:
+            dist_cost *= forward
+
         # heading cost
         target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
         heading_cost = signed_angle_difference(target_angle - current_angle)
@@ -102,11 +103,7 @@ class MPCAgent:
         else:
             heading_cost = np.abs(heading_cost)
 
-        # dist cost
-        dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
-
-        if signed:
-            dist_cost *= forward
+        # heading_cost[np.abs(dist_cost) < 0.015] = 0.
 
         # perp cost
         x1, y1, _ = prev_goal

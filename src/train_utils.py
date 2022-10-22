@@ -8,26 +8,31 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import pickle as pkl
 from tqdm import tqdm
-
+from pdb import set_trace
 import data_utils as dtu
 
 AGENT_PATH = "/home/bvanbuskirk/Desktop/experiments/agent.pkl"
 
 
-def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500, save_agent=False,
-                     train_epochs=100, use_all_data=False, batch_size=500, meta=False):
+def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain=False, consecutive=False, pretrain_samples=500,
+                     save_agent=False, train_epochs=100, use_all_data=False, batch_size=500, meta=False):
     if pretrain:
         n_samples = min(pretrain_samples, replay_buffer.size)
 
-        states = replay_buffer.states[:n_samples]
-        actions = replay_buffer.actions[:n_samples]
-        next_states = replay_buffer.next_states[:n_samples]
+        if consecutive:
+            print("sampling consecutive actions from buffer\n")
+            states = replay_buffer.states[:n_samples]
+            actions = replay_buffer.actions[:n_samples]
+            next_states = replay_buffer.next_states[:n_samples]
+        else:
+            states, actions, next_states = replay_buffer.sample(n_samples)
     else:
         states, actions, next_states = replay_buffer.sample(replay_buffer.size)
 
     training_losses, test_losses, test_idx = train(
-            agent, states, actions, next_states, set_scalers=True, epochs=train_epochs,
-            batch_size=batch_size, use_all_data=use_all_data, meta=meta
+            agent, states, actions, next_states, validation_buffer=validation_buffer,
+            set_scalers=True, epochs=train_epochs, batch_size=batch_size, use_all_data=use_all_data,
+            meta=meta,
     )
 
     if save_agent:
@@ -42,19 +47,23 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
 
     state_delta = agent.dtu.state_delta_xysc(states, next_states)
 
-    test_state, test_action = states[test_idx], actions[test_idx]
-    test_state_delta = dtu.dcn(state_delta[test_idx])
+    # test_state, test_action = states[test_idx], actions[test_idx]
+    # test_state_delta = dtu.dcn(state_delta[test_idx])
+    val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
+    val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
+    val_state, val_action, val_next_state = dtu.as_tensor(val_state, val_action, val_next_state)
+
     with torch.no_grad():
         agent.models[-1].eval()
-        pred_state_delta = agent.models[-1](test_state, test_action, sample=False, delta=True)
+        pred_state_delta = agent.models[-1](val_state, val_action, sample=False, delta=True)
 
-    error = abs(pred_state_delta - test_state_delta)
+    error = abs(pred_state_delta - val_state_delta)
     print("\nERROR MEAN:", error.mean(axis=0))
     print("ERROR STD:", error.std(axis=0))
-    print("ERROR MAX:", error.max(axis=0))
-    print("ERROR MIN:", error.min(axis=0))
+    print("ERROR MAX:", error.max(axis=0)[0])
+    print("ERROR MIN:", error.min(axis=0)[0])
 
-    diffs = abs(test_state_delta)
+    diffs = abs(val_state_delta)
     print("\nACTUAL MEAN:", diffs.mean(axis=0))
     print("ACTUAL STD:", diffs.std(axis=0))
 
@@ -77,10 +86,16 @@ def train_from_buffer(agent, replay_buffer, pretrain=False, pretrain_samples=500
 
     plt.show()
 
-def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scalers=False, use_all_data=False, meta=False):
+def train(agent, state, action, next_state, validation_buffer=None, epochs=5, batch_size=256, set_scalers=False,
+          use_all_data=False, meta=False):
     state, action, next_state = dtu.as_tensor(state, action, next_state)
+    if validation_buffer is not None:
+        val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
+        val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
+        val_state, val_action, val_next_state = dtu.as_tensor(val_state, val_action, val_next_state)
 
-    n_test = int(len(state) * 0.1)
+    # n_test = int(len(state) * 0.1)
+    n_test = 5
     all_idx = torch.arange(len(state))
 
     for k, model in enumerate(agent.models):
@@ -107,8 +122,12 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
 
         with torch.no_grad():
             model.eval()
-            pred_state_delta = model(test_state, test_action, sample=False, delta=True)
-            test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
+            if validation_buffer is not None:
+                pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+                test_loss_mean = F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')
+            else:
+                pred_state_delta = model(test_state, test_action, sample=False, delta=True)
+                test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
         test_losses.append(dtu.dcn(test_loss_mean))
         tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
@@ -131,12 +150,25 @@ def train(agent, state, action, next_state, epochs=5, batch_size=256, set_scaler
 
             with torch.no_grad():
                 model.eval()
-                pred_state_delta = model(test_state, test_action, sample=False, delta=True)
-                test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
+                if validation_buffer is not None:
+                    pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+                    test_loss_mean = F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')
+                else:
+                    pred_state_delta = model(test_state, test_action, sample=False, delta=True)
+                    test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
             train_losses.append(train_loss_mean)
             test_losses.append(dtu.dcn(test_loss_mean))
             tqdm.write(f"{i+1}: train loss: {train_loss_mean:.5f} | test loss: {test_loss_mean:.5f}")
+
+    # for g in model.optimizer.param_groups:
+    #     g['lr'] = model.update_lr
+
+    # print(model.update(train_state, train_action, train_next_state))
+    # pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+    # print("TEST LOSS:", F.mse_loss(pred_state_delta, val_state_delta, reduction='mean'))
+
+    # import pdb;pdb.set_trace()
 
     model.eval()
     return train_losses, test_losses, test_idx
