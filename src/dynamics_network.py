@@ -11,15 +11,18 @@ import data_utils as dtu
 class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=200, hidden_depth=1, lr=0.001, std=0.01, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
+
         assert hidden_depth >= 1
-        input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
+
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-            # hidden_layers += [nn.BatchNorm1d(hidden_dim, momentum=0.1)]
+
+        input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
+
         self.hidden_depth = hidden_depth
         self.scale = scale
         self.dist = dist
@@ -40,7 +43,7 @@ class DynamicsNetwork(nn.Module):
             if hasattr(m.bias, 'data'):
                 m.bias.data.fill_(0.0)
 
-    def forward(self, states, actions, sample=False, return_dist=False, delta=False):
+    def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
         states, actions = dtu.as_tensor(states, actions)
 
         if len(states.shape) == 1:
@@ -54,54 +57,28 @@ class DynamicsNetwork(nn.Module):
         if self.scale:
             inputs = self.standardize_input(inputs)
 
+        if params is not None:
+            # metalearning forward pass
+            x = inputs
+            for i in range(self.hidden_depth + 1):
+                w, b = params[2*i], params[2*i+1]
+                x = F.relu(F.linear(x, w, b))
+
+            w, b = params[-2], params[-1]
+            outputs = F.linear(x, w, b)
+        else:
+            # standard forward pass
+            outputs = self.net(inputs)
+
         if self.dist:
-            mean = self.net(inputs)
+            mean = outputs
             std = torch.ones_like(mean) * self.std
             dist = torch.distributions.normal.Normal(mean, std)
             if return_dist:
                 return dist
             state_deltas_model = dist.rsample() if sample else mean
         else:
-            state_deltas_model = self.net(inputs)
-
-        if self.scale:
-            state_deltas_model = self.unstandardize_output(state_deltas_model)
-
-        if delta:
-            return state_deltas_model
-
-        next_states_model = self.dtu.compute_next_state(states, state_deltas_model)
-        return next_states_model
-
-    def forward_from_params(self, updated_params, states, actions, sample=False, return_dist=False, delta=False):
-        states, actions = dtu.as_tensor(states, actions)
-
-        if len(states.shape) == 1:
-            states = states[None, :]
-        if len(actions.shape) == 1:
-            actions = actions[None, :]
-
-        # state comes in as (x, y, theta)
-        input_states = self.dtu.state_to_model_input(states)
-        x = torch.cat([input_states, actions], dim=1).float()
-        if self.scale:
-            x = self.standardize_input(x)
-
-        for i in range(self.hidden_depth + 1):
-            w, b = updated_params[2*i], updated_params[2*i+1]
-            x = F.relu(F.linear(x, w, b))
-
-        w, b = updated_params[-2], updated_params[-1]
-
-        if self.dist:
-            mean = F.linear(x, w, b)
-            std = torch.ones_like(mean) * self.std
-            dist = torch.distributions.normal.Normal(mean, std)
-            if return_dist:
-                return dist
-            state_deltas_model = dist.rsample() if sample else mean
-        else:
-            state_deltas_model = F.linear(x, w, b)
+            state_deltas_model = outputs
 
         if self.scale:
             state_deltas_model = self.unstandardize_output(state_deltas_model)
@@ -169,15 +146,18 @@ class DynamicsNetwork(nn.Module):
         state_delta = self.dtu.state_delta_xysc(state, next_state)
 
         # chunk into "tasks" i.e. batches continuous in time
-        tasks = 10
+        tasks = 20
+        task_steps = 100
         meta_update_steps = 2
 
-        data_len = len(state) - len(state) % tasks
-        state = state[:]
+        first_idxs = torch.randint(len(state) - 2 * task_steps + 1, (tasks,))
+        tiled_first_idxs = first_idxs.reshape(-1, 1).repeat(1, task_steps)
+        all_idxs = tiled_first_idxs + torch.arange(task_steps)
 
-        batched_states = torch.stack(state[:data_len].chunk(tasks, dim=0))
-        batched_actions = torch.stack(action[:data_len].chunk(tasks, dim=0))
-        batched_state_deltas = torch.stack(state_delta[:data_len].chunk(tasks, dim=0))
+        batched_states = state[all_idxs]
+        batched_actions = action[all_idxs]
+        batched_state_deltas = state_delta[all_idxs]
+
         test_loss_sum = 0
 
         if self.dist and self.scale:
@@ -188,37 +168,27 @@ class DynamicsNetwork(nn.Module):
             train_actions, test_actions = batched_actions[i].chunk(2, dim=0)
             train_state_deltas, test_state_deltas = batched_state_deltas[i].chunk(2, dim=0)
 
-            for j in range(meta_update_steps):
+            params = list(self.net.parameters())
+
+            for _ in range(meta_update_steps):
                 # compute prediction and corresponding training loss
                 if self.dist:
-                    if j == 0:
-                        dist = self(train_states, train_actions, return_dist=True)
-                    else:
-                        dist = self.forward_from_params(updated_params, train_states, train_actions, return_dist=True)
+                    dist = self(train_states, train_actions, return_dist=True, params=params)
                     loss = -dist.log_prob(train_state_deltas).mean()
                 else:
-                    if j == 0:
-                        pred_state_deltas = self(train_states, train_actions, delta=True)
-                    else:
-                        pred_state_deltas = self.forward_from_params(updated_params, train_states, train_actions, delta=True)
+                    pred_state_deltas = self(train_states, train_actions, delta=True, params=params)
                     loss = F.mse_loss(pred_state_deltas, train_state_deltas, reduction='mean')
 
                 # compute gradient and simulate gradient step
-                params = self.net.parameters() if j == 0 else updated_params
                 grad = torch.autograd.grad(loss, params)
-                params = self.net.parameters() if j == 0 else updated_params
-                updated_params = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, params)))
-
-                for k, p in enumerate(updated_params):
-                    if torch.any(torch.isnan(p)) or torch.any(torch.isinf(p)):
-                        import pdb;pdb.set_trace()
+                params = list(map(lambda p: p[1] - self.update_lr * p[0], zip(grad, params)))
 
             # only consider last-step losses for main network update
             if self.dist:
-                test_dist = self.forward_from_params(updated_params, test_states, test_actions, return_dist=True)
+                test_dist = self(test_states, test_actions, return_dist=True, params=params)
                 test_loss_sum -= test_dist.log_prob(test_state_deltas).mean()
             else:
-                pred_state_deltas = self.forward_from_params(updated_params, test_states, test_actions)
+                pred_state_deltas = self(test_states, test_actions, delta=True, params=params)
                 test_loss_sum += F.mse_loss(pred_state_deltas, test_state_deltas)
 
         loss = test_loss_sum / tasks

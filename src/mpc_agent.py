@@ -10,7 +10,7 @@ from data_utils import DataUtils, signed_angle_difference, dimensions
 
 class MPCAgent:
     def __init__(self, seed=1, mpc_method='mppi', hidden_dim=200, hidden_depth=2, lr=0.001,
-                 std=0.01, dist=True, scale=True, ensemble=0, use_object=False,
+                 std=0.01, dist=True, scale=True, ensemble=1, use_object=False,
                  action_range=None, device=torch.device("cpu")):
         assert ensemble > 0
 

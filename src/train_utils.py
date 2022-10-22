@@ -8,7 +8,6 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import pickle as pkl
 from tqdm import tqdm
-from pdb import set_trace
 import data_utils as dtu
 
 AGENT_PATH = "/home/bvanbuskirk/Desktop/experiments/agent.pkl"
