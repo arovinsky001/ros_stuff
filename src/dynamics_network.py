@@ -1,11 +1,10 @@
 #!/usr/bin/python3
 
-from matplotlib import test
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-import data_utils as dtu
+from utils import as_tensor, dcn, apply_yaw_perturbations
 
 
 class DynamicsNetwork(nn.Module):
@@ -44,7 +43,7 @@ class DynamicsNetwork(nn.Module):
                 m.bias.data.fill_(0.0)
 
     def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
-        states, actions = dtu.as_tensor(states, actions)
+        states, actions = as_tensor(states, actions)
 
         if len(states.shape) == 1:
             states = states[None, :]
@@ -91,9 +90,9 @@ class DynamicsNetwork(nn.Module):
 
     def update(self, state, action, next_state):
         self.train()
-        state, action, next_state = dtu.as_tensor(state, action, next_state)
+        state, action, next_state = as_tensor(state, action, next_state)
         state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
-        state, action, state_delta = dtu.apply_yaw_perturbations(state, action, next_state, state_delta)
+        state, action, state_delta = apply_yaw_perturbations(state, action, next_state, state_delta)
 
         if self.dist:
             if self.scale:
@@ -108,18 +107,17 @@ class DynamicsNetwork(nn.Module):
         loss.backward()
         self.optimizer.step()
 
-        return dtu.dcn(loss)
+        return dcn(loss)
 
     def update_meta(self, state, action, next_state):
         self.train()
-        state, action, next_state = dtu.as_tensor(state, action, next_state)
+        state, action, next_state = as_tensor(state, action, next_state)
         state_delta = self.dtu.state_delta_xysc(state, next_state)
-        state, action, state_delta = dtu.apply_yaw_perturbations(state, action, next_state, state_delta)
 
         # chunk into "tasks" i.e. batches continuous in time
         tasks = 20
-        task_steps = 100
-        meta_update_steps = 2
+        task_steps = 10
+        meta_update_steps = 10
 
         first_idxs = torch.randint(len(state) - 2 * task_steps + 1, (tasks,))
         tiled_first_idxs = first_idxs.reshape(-1, 1).repeat(1, task_steps)
@@ -174,10 +172,10 @@ class DynamicsNetwork(nn.Module):
         loss.backward()
         self.lr_optimizer.step()
 
-        return dtu.dcn(test_loss_sum)
+        return dcn(test_loss_sum)
 
     def set_scalers(self, state, action, next_state):
-        state, action, next_state = dtu.as_tensor(state, action, next_state)
+        state, action, next_state = as_tensor(state, action, next_state)
         input_state = self.dtu.state_to_model_input(state)
 
         state_action = torch.cat([input_state, action], axis=1)

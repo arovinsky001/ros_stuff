@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+from cProfile import label
 import os
 import argparse
 import pickle as pkl
@@ -11,9 +12,9 @@ from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import AGENT_PATH, train_from_buffer
-from data_utils import dimensions
+from utils import build_action_request, dimensions
 
-from ros_stuff.msg import RobotCmd, ProcessedStates
+from ros_stuff.msg import ProcessedStates
 from ros_stuff.srv import CommandAction
 
 # seed for reproducibility
@@ -28,7 +29,7 @@ class Experiment():
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, rate, use_all_data, debug,
                  save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, rand_ac_mean,
-                 meta, **kwargs):
+                 meta, warmup_test, **kwargs):
         # flags for different stages of eval
         self.started = False
         self.done = False
@@ -83,6 +84,7 @@ class Experiment():
         self.scale = scale
         self.debug = debug
         self.meta = meta
+        self.do_warmup_test = warmup_test
         self.start_lap_time = np.random.rand() * lap_time
         self.reverse_lap = False
 
@@ -180,6 +182,9 @@ class Experiment():
         np.set_printoptions(suppress=True)
 
     def run(self):
+        if self.do_warmup_test:
+            self.warmup_test()
+
         self.take_warmup_steps()
 
         r = rospy.Rate(self.rate)
@@ -237,11 +242,7 @@ class Experiment():
             negate = np.random.randint(0, 2)
             actions = np.array([[1, 1], [1, -1]]) * 0.999
             action = actions[idx] * (-1 if negate else 1)
-
-            action_req = RobotCmd()
-            action_req.left_pwm = action[0]
-            action_req.right_pwm = action[1]
-            action_req.duration = self.duration
+            action_req = build_action_request(action, self.duration)
 
             self.service_proxy(action_req, f"kami{self.robot_id}")
             rospy.sleep(self.post_action_sleep_time)
@@ -287,10 +288,7 @@ class Experiment():
             action = actions[self.replay_buffer.size]
 
         action = np.clip(action, *self.action_range)
-        action_req = RobotCmd()
-        action_req.left_pwm = action[0]
-        action_req.right_pwm = action[1]
-        action_req.duration = self.duration
+        action_req = build_action_request(action, self.duration)
 
         if not self.debug:
             print("SENDING ACTION")
@@ -441,6 +439,32 @@ class Experiment():
                     states, actions, next_states = self.replay_buffer.sample(self.batch_size)
                     model.update(states, actions, next_states)
 
+    def warmup_test(self):
+        norms = []
+        n_steps = 50
+
+        for i in trange(n_steps, desc="Warmup Test"):
+            state = self.get_state()
+
+            # alternate between forward and backward steps
+            action = np.array([1, 1]) * 0.9 * (-1 if i % 2 == 0 else 1)
+            action_req = build_action_request(action, self.duration)
+            self.service_proxy(action_req, f"kami{self.robot_id}")
+            rospy.sleep(self.post_action_sleep_time)
+
+            next_state = self.get_state()
+            norms.append(np.linalg.norm((next_state - state)[:2]))
+
+        import matplotlib.pyplot as plt
+        steps = np.arange(n_steps // 2)
+        plt.plot(steps, norms[::2], color="blue", label="Forward Step Distance")
+        plt.plot(steps, norms[1::2], color="green", label="Backward Step Distance")
+        plt.xlabel("Step")
+        plt.ylabel("Distance")
+        plt.title("Warmup Test: Forward and Backward Step Distances Over Time")
+        plt.legend()
+        plt.show()
+
 def main(args):
     rospy.init_node("laptop_client_mpc")
 
@@ -509,6 +533,7 @@ if __name__ == '__main__':
     parser.add_argument('-rand_rot', action='store_true')
     parser.add_argument('-exp_name')
     parser.add_argument('-meta', action='store_true')
+    parser.add_argument('-warmup_test', action='store_true')
 
 
     args = parser.parse_args()

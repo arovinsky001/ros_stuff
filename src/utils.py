@@ -3,6 +3,8 @@
 import numpy as np
 import torch
 
+from ros_stuff.msg import RobotCmd
+
 
 dimensions = {
     "action_dim": 2,                            # left_pwm, right_pwm
@@ -80,6 +82,13 @@ def apply_yaw_perturbations(state, action, next_state, state_delta):
     state_delta[:, 3] = cos_delta
 
     return state, action, state_delta
+
+def build_action_request(action, duration):
+    action_req = RobotCmd()
+    action_req.left_pwm = action[0]
+    action_req.right_pwm = action[1]
+    action_req.duration = duration
+    return action_req
 
 
 class DataUtils:

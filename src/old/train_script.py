@@ -7,7 +7,7 @@ import torch
 from matplotlib import pyplot as plt
 
 from real_mpc_dynamics import MPCAgent
-import data_utils as dtu
+from utils import dcn
 
 parser = argparse.ArgumentParser(description='Train/load agent and do MPC.')
 parser.add_argument('-load_agent_path', type=str,
@@ -233,9 +233,9 @@ for model in agent.models:
 state_delta = agent.dtu.state_delta_xysc(states, next_states)
 
 test_state, test_action = states[test_idx], actions[test_idx]
-test_state_delta = dtu.dcn(state_delta[test_idx])
+test_state_delta = dcn(state_delta[test_idx])
 
-pred_state_delta = dtu.dcn(model(test_state, test_action, sample=False))
+pred_state_delta = dcn(model(test_state, test_action, sample=False))
 # pred_state_delta = agent.get_prediction(test_states, test_actions, sample=False, scale=args.scale, delta=True, use_ensemble=False)
 
 error = abs(pred_state_delta - test_state_delta)

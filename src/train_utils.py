@@ -3,12 +3,14 @@
 import numpy as np
 import torch
 from torch.nn import functional as F
-from sklearn.model_selection import train_test_split
 
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
+
 import pickle as pkl
 from tqdm import tqdm
-import data_utils as dtu
+
+from utils import dcn, as_tensor
 
 AGENT_PATH = "/home/bvanbuskirk/Desktop/experiments/agent.pkl"
 
@@ -47,10 +49,10 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain=Fal
     state_delta = agent.dtu.state_delta_xysc(states, next_states)
 
     # test_state, test_action = states[test_idx], actions[test_idx]
-    # test_state_delta = dtu.dcn(state_delta[test_idx])
+    # test_state_delta = dcn(state_delta[test_idx])
     val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
     val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
-    val_state, val_action, val_next_state = dtu.as_tensor(val_state, val_action, val_next_state)
+    val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
     with torch.no_grad():
         agent.models[-1].eval()
@@ -87,11 +89,11 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain=Fal
 
 def train(agent, state, action, next_state, validation_buffer=None, epochs=5, batch_size=256, set_scalers=False,
           use_all_data=False, meta=False):
-    state, action, next_state = dtu.as_tensor(state, action, next_state)
+    state, action, next_state = as_tensor(state, action, next_state)
     if validation_buffer is not None:
         val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
         val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
-        val_state, val_action, val_next_state = dtu.as_tensor(val_state, val_action, val_next_state)
+        val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
     # n_test = int(len(state) * 0.1)
     n_test = 5
@@ -99,7 +101,7 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
 
     for k, model in enumerate(agent.models):
         if meta:
-            train_idx, test_idx = all_idx[:-n_test], all_idx[-n_test:]
+            train_idx, test_idx = all_idx, all_idx
         else:
             train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=agent.seed + k)
 
@@ -119,6 +121,7 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
         train_losses, test_losses = [], []
         n_batches = int(np.ceil(len(train_state) / batch_size))
 
+        # evaluate
         with torch.no_grad():
             model.eval()
             if validation_buffer is not None:
@@ -128,25 +131,24 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
                 pred_state_delta = model(test_state, test_action, sample=False, delta=True)
                 test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
-        test_losses.append(dtu.dcn(test_loss_mean))
+        test_losses.append(dcn(test_loss_mean))
         tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
 
         print("\n\nTRAINING MODEL\n")
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
-            if meta:
-                shuffle_idx = train_idx
-            else:
-                shuffle_idx = np.random.permutation(len(train_state))
-            train_state, train_action, train_next_state = train_state[shuffle_idx], train_action[shuffle_idx], train_next_state[shuffle_idx]
-
+            # train
             if meta:
                 train_loss_mean = model.update_meta(train_state, train_action, train_next_state)
             else:
+                shuffle_idx = np.random.permutation(len(train_state))
+                train_state, train_action, train_next_state = train_state[shuffle_idx], train_action[shuffle_idx], train_next_state[shuffle_idx]
+
                 for j in tqdm(range(n_batches), desc="Batch", position=1, leave=False):
                     start, end = j * batch_size, (j + 1) * batch_size
                     batch_state, batch_action, batch_next_state = train_state[start:end], train_action[start:end], train_next_state[start:end]
                     train_loss_mean = model.update(batch_state, batch_action, batch_next_state)
 
+            # evaluate
             with torch.no_grad():
                 model.eval()
                 if validation_buffer is not None:
@@ -157,17 +159,22 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
                     test_loss_mean = F.mse_loss(pred_state_delta, test_state_delta, reduction='mean')
 
             train_losses.append(train_loss_mean)
-            test_losses.append(dtu.dcn(test_loss_mean))
+            test_losses.append(dcn(test_loss_mean))
             tqdm.write(f"{i+1}: train loss: {train_loss_mean:.5f} | test loss: {test_loss_mean:.5f}")
 
-    # for g in model.optimizer.param_groups:
-    #     g['lr'] = model.update_lr
+    if meta:
+        for g in model.optimizer.param_groups:
+            # g['lr'] = model.update_lr
+            g['lr'] = torch.clamp(model.update_lr, 1e-3, 1)
 
-    # print(model.update(train_state, train_action, train_next_state))
-    # pred_state_delta = model(val_state, val_action, sample=False, delta=True)
-    # print("TEST LOSS:", F.mse_loss(pred_state_delta, val_state_delta, reduction='mean'))
+        losses = []
+        for i in range(100):
+            model.update(train_state[:20], train_action[:20], train_next_state[:20])
+            pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+            losses.append(dcn(F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')))
 
-    # import pdb;pdb.set_trace()
+        print("\nMIN META TEST ITER:", np.argmin(losses))
+        print("MIN META TEST LOSS:", np.min(losses), "\n")
 
     model.eval()
     return train_losses, test_losses, test_idx
