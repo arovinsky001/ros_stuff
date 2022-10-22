@@ -12,7 +12,7 @@ from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import AGENT_PATH, train_from_buffer
-from utils import build_action_request, dimensions
+from utils import build_action_request, signed_angle_difference, dimensions
 
 from ros_stuff.msg import ProcessedStates
 from ros_stuff.srv import CommandAction
@@ -87,6 +87,7 @@ class Experiment():
         self.do_warmup_test = warmup_test
         self.start_lap_time = np.random.rand() * lap_time
         self.reverse_lap = False
+        self.predicted_next_state = np.zeros(3)
 
         if not robot_goals:
             assert self.use_object
@@ -210,6 +211,13 @@ class Experiment():
                 next_state = self.get_state()
                 self.collect_training_data(state, action, next_state)
 
+                prediction_error = np.array([
+                    np.linalg.norm((next_state - self.predicted_next_state[:2])),
+                    signed_angle_difference(next_state[2] - self.predicted_next_state[2]),
+                ])
+
+                print("\nPREDICTION ERROR (distance, heading):", prediction_error, "\n")
+
             if self.online:
                 self.update_model_online()
 
@@ -270,7 +278,14 @@ class Experiment():
         prev_goal = state_for_prev_goal
 
         if self.replay_buffer.size >= self.random_steps:
-            action = self.agent.get_action(state, prev_goal, goal, cost_weights=self.cost_weights, params=self.mpc_params)
+            action, self.predicted_next_state = self.agent.get_action(
+                state,
+                prev_goal,
+                goal,
+                cost_weights=self.cost_weights,
+                params=self.mpc_params
+            )
+
             self.time_elapsed += self.duration * (-1 if self.reverse_lap else 1) if self.started else 0
         else:
             print("TAKING RANDOM ACTION")
@@ -457,10 +472,11 @@ class Experiment():
 
         import matplotlib.pyplot as plt
         steps = np.arange(n_steps // 2)
-        plt.plot(steps, norms[::2], color="blue", label="Forward Step Distance")
-        plt.plot(steps, norms[1::2], color="green", label="Backward Step Distance")
+        norms_cm = norms / 100
+        plt.plot(steps, norms_cm[::2], color="blue", label="Forward Step Distance")
+        plt.plot(steps, norms_cm[1::2], color="green", label="Backward Step Distance")
         plt.xlabel("Step")
-        plt.ylabel("Distance")
+        plt.ylabel("Distance (cm)")
         plt.title("Warmup Test: Forward and Backward Step Distances Over Time")
         plt.legend()
         plt.show()

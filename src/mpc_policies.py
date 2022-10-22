@@ -33,7 +33,7 @@ class MPCPolicy:
         return total_costs
 
     def get_action(self):
-        return
+        return None, None
 
 
 class RandomShootingPolicy(MPCPolicy):
@@ -49,7 +49,11 @@ class RandomShootingPolicy(MPCPolicy):
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
         total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals)
 
-        return sampled_actions[total_costs.argmin(), 0]
+        best_idx = total_costs.argmin()
+        best_action = sampled_actions[best_idx, 0]
+        predicted_next_state = predicted_state_sequence[:, best_idx, 0].squeeze()
+
+        return best_action, predicted_next_state
 
 
 class CEMPolicy(MPCPolicy):
@@ -89,7 +93,10 @@ class CEMPolicy(MPCPolicy):
             if trajectory_std.max() < 0.02:
                 break
 
-        return trajectory_mean[:self.action_dim]
+        best_action = trajectory_mean[:self.action_dim]
+        predicted_next_state = self.simulate(initial_state, best_action).squeeze()
+
+        return best_action, predicted_next_state
 
 
 class MPPIPolicy(MPCPolicy):
@@ -132,4 +139,7 @@ class MPPIPolicy(MPCPolicy):
         weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)
         self.trajectory_mean = weighted_trajectories / weights.sum()
 
-        return self.trajectory_mean[:self.action_dim]
+        best_action = self.trajectory_mean[:self.action_dim]
+        predicted_next_state = self.simulate(initial_state, best_action).squeeze()
+
+        return best_action, predicted_next_state

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 
-from real_mpc_dynamics import MPCAgent
+from mpc_agent import MPCAgent
 from utils import dcn
 
 parser = argparse.ArgumentParser(description='Train/load agent and do MPC.')
