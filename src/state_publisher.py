@@ -22,6 +22,7 @@ class StatePublisher:
 
         self.base_id = base_id
         self.base_frame = f"ar_marker_{base_id}"
+        self.robot_frame = f"ar_marker_{robot_id}"
         self.name_to_id = {"robot": robot_id,
                            "object": object_id,
                            "base": base_id,
@@ -63,8 +64,14 @@ class StatePublisher:
                     camera_frame_pose = marker.pose
                     camera_frame_pose.header.frame_id = WORLD_FRAME
 
-                    base_transform = self.tf_buffer.lookup_transform(self.base_frame, WORLD_FRAME, rospy.Time(0))
-                    pose = tf2_geometry_msgs.do_transform_pose(camera_frame_pose, base_transform).pose
+                    if marker.id == self.name_to_id["object"]:
+                        # get object pose relative to robot
+                        robot_transform = self.tf_buffer.lookup_transform(self.robot_frame, WORLD_FRAME, rospy.Time(0))
+                        pose = tf2_geometry_msgs.do_transform_pose(camera_frame_pose, robot_transform).pose
+                    else:
+                        # get robot or corner pose relative to base frame
+                        base_transform = self.tf_buffer.lookup_transform(self.base_frame, WORLD_FRAME, rospy.Time(0))
+                        pose = tf2_geometry_msgs.do_transform_pose(camera_frame_pose, base_transform).pose
 
                     break
                 except (tf2_ros.LookupException,
