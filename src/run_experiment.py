@@ -24,7 +24,7 @@ np.random.seed(SEED)
 
 
 class Experiment():
-    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, state_timestamp,
+    def __init__(self, robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, state_timestamp,
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, rate, use_all_data, debug,
@@ -47,6 +47,7 @@ class Experiment():
         self.robot_pos = robot_pos
         self.object_pos = object_pos
         self.corner_pos = corner_pos
+        self.object_to_robot_pos = object_to_robot_pos
         self.robot_vel = robot_vel
         self.object_vel = object_vel
         self.state_timestamp = state_timestamp
@@ -87,7 +88,7 @@ class Experiment():
         self.do_warmup_test = warmup_test
         self.start_lap_time = np.random.rand() * lap_time
         self.reverse_lap = False
-        self.predicted_next_state = np.zeros(3)
+        self.predicted_next_state = np.zeros(6) if self.use_object else np.zeros(3)
 
         if not robot_goals:
             assert self.use_object
@@ -130,15 +131,15 @@ class Experiment():
             }
         else:
             self.cost_weights = None
-            # self.cost_weights = {
-            #     "distance": 1.,
-            #     "heading": 0.1,
-            #     "perpendicular": 0.,
-            #     "action_norm": 0.,
-            #     "distance_bonus": 0.,
-            #     "separation": 0.1,
-            #     "heading_difference": 0.1,
-            # }
+            self.cost_weights = {
+                "distance": 1.,
+                "heading": 0.,
+                "perpendicular": 0.,
+                "action_norm": 0.,
+                "distance_bonus": 0.,
+                "separation": 0.,
+                "heading_difference": 0.,
+            }
 
         # parameters for MPC methods
         self.mpc_params = {
@@ -212,7 +213,7 @@ class Experiment():
                 self.collect_training_data(state, action, next_state)
 
                 prediction_error = np.array([
-                    np.linalg.norm((next_state - self.predicted_next_state[:2])),
+                    np.linalg.norm((next_state - self.predicted_next_state)[:2]),
                     signed_angle_difference(next_state[2] - self.predicted_next_state[2]),
                 ])
 
@@ -245,7 +246,7 @@ class Experiment():
         if self.debug:
             return
 
-        for _ in trange(30, desc="Warmup Steps"):
+        for _ in trange(10, desc="Warmup Steps"):
             idx = np.random.randint(0, 2)
             negate = np.random.randint(0, 2)
             actions = np.array([[1, 1], [1, -1]]) * 0.999
@@ -264,7 +265,7 @@ class Experiment():
         robot_pos[2] = (robot_pos[2] + self.yaw_offsets[self.robot_id]) % (2 * np.pi)
 
         if self.use_object:
-            object_pos = self.object_pos.copy()
+            object_pos = self.object_to_robot_pos.copy()
             object_pos[2] = (object_pos[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
 
             return np.concatenate((robot_pos, object_pos), axis=0)
@@ -295,12 +296,12 @@ class Experiment():
             #     locs *= -1
             # scale = 0.7 if self.rand_ac_mean == 0 else 0.3
             # # action = np.random.normal(loc=locs[idx], scale=scale, size=dimensions["action_dim"])
-            # action = np.random.uniform(*self.action_range, size=dimensions["action_dim"]).squeeze()
+            action = np.random.uniform(-1.1, 1.1, size=dimensions["action_dim"]).squeeze()
 
-            rng = np.linspace(-1, 1, 3)
-            left, right = np.meshgrid(rng, rng)
-            actions = np.stack((left, right)).transpose(2, 1, 0).reshape(-1, 2)
-            action = actions[self.replay_buffer.size]
+            # rng = np.linspace(-1, 1, 3)
+            # left, right = np.meshgrid(rng, rng)
+            # actions = np.stack((left, right)).transpose(2, 1, 0).reshape(-1, 2)
+            # action = actions[self.replay_buffer.size]
 
         action = np.clip(action, *self.action_range)
         action_req = build_action_request(action, self.duration)
@@ -456,30 +457,46 @@ class Experiment():
 
     def warmup_test(self):
         norms = []
-        n_steps = 50
+        heading_diffs = []
+        n_steps = 2000
 
         for i in trange(n_steps, desc="Warmup Test"):
             state = self.get_state()
 
             # alternate between forward and backward steps
-            action = np.array([1, 1]) * 0.9 * (-1 if i % 2 == 0 else 1)
+            action = np.array([1, 1]) * 0.7 * (-1 if i % 2 == 0 else 1)
             action_req = build_action_request(action, self.duration)
             self.service_proxy(action_req, f"kami{self.robot_id}")
             rospy.sleep(self.post_action_sleep_time)
 
             next_state = self.get_state()
             norms.append(np.linalg.norm((next_state - state)[:2]))
+            heading_diffs.append(signed_angle_difference(next_state[2] - state[2]))
 
         import matplotlib.pyplot as plt
         steps = np.arange(n_steps // 2)
-        norms_cm = norms / 100
+        norms_cm = np.array(norms) * 100
+        heading_diffs_deg = np.array(heading_diffs) * 180 / np.pi
+
+        plt.figure()
         plt.plot(steps, norms_cm[::2], color="blue", label="Forward Step Distance")
         plt.plot(steps, norms_cm[1::2], color="green", label="Backward Step Distance")
         plt.xlabel("Step")
         plt.ylabel("Distance (cm)")
         plt.title("Warmup Test: Forward and Backward Step Distances Over Time")
         plt.legend()
+
+        plt.figure()
+        plt.plot(steps, heading_diffs_deg[::2], color="blue", label="Forward Step Heading Change")
+        plt.plot(steps, heading_diffs_deg[1::2], color="green", label="Backward Step Heading Change")
+        plt.xlabel("Step")
+        plt.ylabel("Angle (deg)")
+        plt.title("Warmup Test: Forward and Backward Step Heading Changes Over Time")
+        plt.legend()
+
         plt.show()
+
+        import pdb;pdb.set_trace()
 
 def main(args):
     rospy.init_node("laptop_client_mpc")
@@ -489,16 +506,18 @@ def main(args):
     robot_pos = np.empty(pos_dim)
     object_pos = np.empty(pos_dim)
     corner_pos = np.empty(pos_dim)
+    object_to_robot_pos = np.empty(pos_dim)
     robot_vel = np.empty(vel_dim)
     object_vel = np.empty(vel_dim)
     state_timestamp = np.empty(1)
 
     def update_state(msg):
-        rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
+        rs, os, cs, ors = msg.robot_state, msg.object_state, msg.corner_state, msg.object_to_robot_state
 
         robot_pos[:] = np.array([rs.x, rs.y, rs.yaw])
         object_pos[:] = np.array([os.x, os.y, os.yaw])
         corner_pos[:] = np.array([cs.x, cs.y, cs.yaw])
+        object_to_robot_pos[:] = np.array([ors.x, ors.y, ors.yaw])
 
         robot_vel[:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
         object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
@@ -510,7 +529,7 @@ def main(args):
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, state_timestamp, **vars(args))
+    experiment = Experiment(robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, state_timestamp, **vars(args))
     experiment.run()
 
 

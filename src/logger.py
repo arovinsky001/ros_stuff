@@ -104,7 +104,7 @@ class Logger:
             pkl.dump(replay_buffer, f)
 
     def load_buffer(self, robot_id):
-        pkl_path = self.buffer_path + f"{self.object_or_robot}_buffer0_learncurve2.pkl"
+        pkl_path = self.buffer_path + f"{self.object_or_robot}_buffer.pkl"
         validation_path = self.buffer_path + f"{self.object_or_robot}{robot_id}_validation_buffer.pkl"
 
         if os.path.exists(pkl_path):
@@ -113,8 +113,11 @@ class Logger:
         else:
             replay_buffer = None
 
-        with open(validation_path, 'rb') as f:
-            validation_buffer = pkl.load(f)
+        if os.path.exists(validation_path):
+            with open(validation_path, 'rb') as f:
+                validation_buffer = pkl.load(f)
+        else:
+            validation_buffer = None
 
         return replay_buffer, validation_buffer
 

@@ -94,7 +94,7 @@ class CEMPolicy(MPCPolicy):
                 break
 
         best_action = trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action).squeeze()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze()
 
         return best_action, predicted_next_state
 
@@ -140,6 +140,6 @@ class MPPIPolicy(MPCPolicy):
         self.trajectory_mean = weighted_trajectories / weights.sum()
 
         best_action = self.trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action).squeeze()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze()
 
         return best_action, predicted_next_state
