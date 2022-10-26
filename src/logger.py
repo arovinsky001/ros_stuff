@@ -86,7 +86,8 @@ class Logger:
         self.object_states = []
         self.goal_states = []
 
-    def log_states(self, robot_pos, object_pos, goal_pos, started):
+    def log_states(self, state_dict, goal_pos, started):
+        robot_pos, object_pos = state_dict["robot"], state_dict["object"]
         if started or self.plot:
             self.robot_states.append(robot_pos.copy())
             self.object_states.append(object_pos.copy())

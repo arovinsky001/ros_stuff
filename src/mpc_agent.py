@@ -14,12 +14,11 @@ class MPCAgent:
                  action_range=None, device=torch.device("cpu")):
         assert ensemble > 0
 
-        input_dim = dimensions["action_dim"] + dimensions["robot_input_dim"]
+        input_dim = dimensions["action_dim"]
         output_dim = dimensions["robot_output_dim"]
         self.state_dim = dimensions["state_dim"]
 
         if use_object:
-            input_dim += dimensions["object_input_dim"]
             output_dim += dimensions["object_output_dim"]
             self.state_dim += dimensions["state_dim"]
 
@@ -90,7 +89,7 @@ class MPCAgent:
 
         # heading cost
         target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
-        heading_cost = signed_angle_difference(target_angle - current_angle)
+        heading_cost = signed_angle_difference(target_angle, current_angle)
 
         left = (heading_cost > 0) * 2 - 1
         forward = (np.abs(heading_cost) < np.pi / 2) * 2 - 1

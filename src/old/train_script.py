@@ -230,7 +230,7 @@ else:
 for model in agent.models:
     model.eval()
 
-state_delta = agent.dtu.state_delta_xysc(states, next_states)
+state_delta = agent.dtu.compute_relative_delta_xysc(states, next_states)
 
 test_state, test_action = states[test_idx], actions[test_idx]
 test_state_delta = dcn(state_delta[test_idx])

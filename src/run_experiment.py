@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-from cProfile import label
 import os
 import argparse
 import pickle as pkl
@@ -16,6 +15,7 @@ from utils import build_action_request, signed_angle_difference, dimensions
 
 from ros_stuff.msg import ProcessedStates
 from ros_stuff.srv import CommandAction
+import tf2_ros
 
 # seed for reproducibility
 SEED = 0
@@ -24,7 +24,7 @@ np.random.seed(SEED)
 
 
 class Experiment():
-    def __init__(self, robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, state_timestamp,
+    def __init__(self, robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel,
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, rate, use_all_data, debug,
@@ -44,13 +44,14 @@ class Experiment():
         self.object_id = object_id
 
         # states
-        self.robot_pos = robot_pos
-        self.object_pos = object_pos
-        self.corner_pos = corner_pos
-        self.object_to_robot_pos = object_to_robot_pos
         self.robot_vel = robot_vel
         self.object_vel = object_vel
-        self.state_timestamp = state_timestamp
+        self.state_dict = {
+            "robot": robot_pos,
+            "object": object_pos,
+            "corner": corner_pos,
+            "object_to_robot": object_to_robot_pos,
+        }
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
@@ -102,6 +103,11 @@ class Experiment():
         if new_buffer or self.replay_buffer is None:
             state_dim = 2 * dimensions["state_dim"] if self.use_object else dimensions["state_dim"]
             self.replay_buffer = ReplayBuffer(capacity=100000, state_dim=state_dim, action_dim=dimensions["action_dim"])
+
+        print("setting up tf buffer/listener")
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        print("finished setting up tf buffer/listener")
 
         if not self.debug:
             print(f"waiting for robot {self.robot_id} service")
@@ -199,7 +205,7 @@ class Experiment():
                 self.prev_goal = self.get_goal()
 
             state, action = self.step()
-            self.logger.log_states(self.robot_pos, self.object_pos, self.prev_goal, self.started)
+            self.logger.log_states(self.state_dict, self.prev_goal, self.started)
 
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
@@ -214,7 +220,7 @@ class Experiment():
 
                 prediction_error = np.array([
                     np.linalg.norm((next_state - self.predicted_next_state)[:2]),
-                    signed_angle_difference(next_state[2] - self.predicted_next_state[2]),
+                    signed_angle_difference(next_state[2], self.predicted_next_state[2]),
                 ])
 
                 print("\nPREDICTION ERROR (distance, heading):", prediction_error, "\n")
@@ -257,18 +263,21 @@ class Experiment():
             rospy.sleep(self.post_action_sleep_time)
 
     def get_state(self):
-        if np.any(self.robot_pos[:2] > self.corner_pos[:2]) or np.any(self.robot_pos[:2] < 0):
+        robot_pos = self.state_dict["robot"].copy()
+        object_to_robot = self.state_dict["object_to_robot"].copy()
+        corner_pos = self.state_dict["corner"].copy()
+
+        if np.any(robot_pos[:2] > corner_pos[:2]) or np.any(robot_pos[:2] < 0):
             print("\nOUT OF BOUNDS\n")
             import pdb;pdb.set_trace()
 
-        robot_pos = self.robot_pos.copy()
+        # apply yaw offset
         robot_pos[2] = (robot_pos[2] + self.yaw_offsets[self.robot_id]) % (2 * np.pi)
 
         if self.use_object:
-            object_pos = self.object_to_robot_pos.copy()
-            object_pos[2] = (object_pos[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
+            object_to_robot[2] = (object_to_robot[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
 
-            return np.concatenate((robot_pos, object_pos), axis=0)
+            return np.concatenate((robot_pos, object_to_robot), axis=0)
         else:
             return robot_pos
 
@@ -362,8 +371,9 @@ class Experiment():
         back_circle_center_rel = np.array([0.7, 0.5])
         front_circle_center_rel = np.array([0.4, 0.5])
 
-        self.back_circle_center = back_circle_center_rel * self.corner_pos[:2]
-        self.front_circle_center = front_circle_center_rel * self.corner_pos[:2]
+        corner_pos = self.state_dict["corner"].copy()
+        self.back_circle_center = back_circle_center_rel * corner_pos[:2]
+        self.front_circle_center = front_circle_center_rel * corner_pos[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
     def record_costs(self, prev_goal, goal):
@@ -471,7 +481,7 @@ class Experiment():
 
             next_state = self.get_state()
             norms.append(np.linalg.norm((next_state - state)[:2]))
-            heading_diffs.append(signed_angle_difference(next_state[2] - state[2]))
+            heading_diffs.append(signed_angle_difference(next_state[2], state[2]))
 
         import matplotlib.pyplot as plt
         steps = np.arange(n_steps // 2)
@@ -509,7 +519,6 @@ def main(args):
     object_to_robot_pos = np.empty(pos_dim)
     robot_vel = np.empty(vel_dim)
     object_vel = np.empty(vel_dim)
-    state_timestamp = np.empty(1)
 
     def update_state(msg):
         rs, os, cs, ors = msg.robot_state, msg.object_state, msg.corner_state, msg.object_to_robot_state
@@ -522,14 +531,11 @@ def main(args):
         robot_vel[:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
         object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
 
-        secs, nsecs = msg.header.stamp.secs, msg.header.stamp.nsecs
-        state_timestamp[:] = secs + nsecs / 1e9
-
     print("waiting for /processed_state topic from state publisher")
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    experiment = Experiment(robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, state_timestamp, **vars(args))
+    experiment = Experiment(robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, **vars(args))
     experiment.run()
 
 

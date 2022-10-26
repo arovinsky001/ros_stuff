@@ -46,14 +46,14 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain=Fal
     print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
     print("MIN TEST LOSS:", test_losses.min())
 
-    state_delta = agent.dtu.state_delta_xysc(states, next_states)
+    state_delta = agent.dtu.compute_relative_delta_xysc(states, next_states)
 
     # test_state, test_action = states[test_idx], actions[test_idx]
     # test_state_delta = dcn(state_delta[test_idx])
 
     if validation_buffer is not None:
         val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
-        val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
+        val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
         val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
         with torch.no_grad():
@@ -94,11 +94,10 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
     state, action, next_state = as_tensor(state, action, next_state)
     if validation_buffer is not None:
         val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
-        val_state_delta = agent.dtu.state_delta_xysc(val_state, val_next_state)
+        val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
         val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
-    # n_test = int(len(state) * 0.1)
-    n_test = 5
+    n_test = int(len(state) * 0.1) if not use_all_data else 2
     all_idx = torch.arange(len(state))
 
     for k, model in enumerate(agent.models):
@@ -108,7 +107,7 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
             train_idx, test_idx = train_test_split(all_idx, test_size=n_test, random_state=agent.seed + k)
 
         test_state, test_action, test_next_state = state[test_idx], action[test_idx], next_state[test_idx]
-        test_state_delta = agent.dtu.state_delta_xysc(test_state, test_next_state)
+        test_state_delta = agent.dtu.compute_relative_delta_xysc(test_state, test_next_state)
 
         if use_all_data:
             train_idx = all_idx

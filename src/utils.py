@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from ros_stuff.msg import RobotCmd
+# from ros_stuff.msg import RobotCmd
 
 
 dimensions = {
@@ -41,8 +41,8 @@ def as_tensor(*args):
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
 
-def signed_angle_difference(diff):
-    return (diff + torch.pi) % (2 * torch.pi) - torch.pi
+def signed_angle_difference(angle1, angle2):
+    return (angle1 - angle2 + torch.pi) % (2 * torch.pi) - torch.pi
 
 def apply_yaw_perturbations(state, action, next_state, state_delta):
     state, action, state_delta = state.clone(), action.clone(), state_delta.clone()
@@ -193,25 +193,96 @@ class DataUtils:
 
         return state_delta_xysc
 
-    def compute_next_state(self, state, state_delta):
-        """
-        Inputs:
-            if use_object:
-                state = [x, y, theta, x, y, theta]
-                state_delta = [x, y, sin(theta), cos(theta), x, y, sin(theta), cos(theta)]
-            else:
-                state = [x, y, theta]
-                state_delta = [x, y, sin(theta), cos(theta)]
-        Output:
-            if use_object:
-                next_state = [x, y, theta, x, y, theta]
-            else:
-                next_state = [x, y, theta]
-        """
-        state, state_delta = as_tensor(state, state_delta)
-        state_xysc = self.state_to_xysc(state)
+    def compute_relative_delta_xysc(self, state, next_state):
+        state, next_state = as_tensor(state, next_state)
 
-        next_state_xysc = state_xysc + state_delta
-        next_state = self.state_from_xysc(next_state_xysc)
+        robot_xy, next_robot_xy = state[:, :2], next_state[:, :2]
+        robot_heading, next_robot_heading = state[:, 2], next_state[:, 2]
+
+        # rotate xy deltas by -robot_heading to get xy deltas relative to current robot state
+        sin, cos = torch.sin(-robot_heading), torch.cos(-robot_heading)
+        rotation = torch.stack((torch.stack((cos, -sin)),
+                                torch.stack((sin, cos)))).permute(2, 0, 1)
+        absolute_robot_delta_xy = next_robot_xy - robot_xy
+        relative_robot_delta_xy = (rotation @ absolute_robot_delta_xy[:, :, None]).squeeze()
+
+        # compute sin and cos of next robot heading relative to current robot heading
+        relative_next_robot_heading = signed_angle_difference(next_robot_heading, robot_heading)
+        rel_next_sin, rel_next_cos = torch.sin(relative_next_robot_heading), torch.cos(relative_next_robot_heading)
+        relative_robot_delta_sc = torch.stack((rel_next_sin, rel_next_cos), dim=1)
+
+        relative_robot_delta_xysc = torch.cat((relative_robot_delta_xy, relative_robot_delta_sc), dim=1)
+
+        if self.use_object:
+            object_xy, next_object_xy = state[:, 3:5], next_state[:, 3:5]
+            object_heading, next_object_heading = state[:, 5], next_state[:, 5]
+
+            # compute object-to-robot xy deltas rotated by -robot_heading (all w.r.t. current robot state)
+            abs_object_to_robot_xy = robot_xy - object_xy
+            abs_next_object_to_robot_xy = robot_xy - next_object_xy
+            absolute_object_to_robot_delta_xy = abs_next_object_to_robot_xy - abs_object_to_robot_xy
+            relative_object_delta_xy = (rotation @ absolute_object_to_robot_delta_xy[:, :, None]).squeeze()
+
+            # compute sin and cos difference from next to current object heading relative to robot
+            relative_object_heading = signed_angle_difference(object_heading, robot_heading)
+            relative_next_object_heading = signed_angle_difference(next_object_heading, robot_heading)
+
+            rel_sin, rel_cos = torch.sin(relative_object_heading), torch.cos(relative_object_heading)
+            rel_next_sin, rel_next_cos = torch.sin(relative_next_object_heading), torch.cos(relative_next_object_heading)
+            rel_sin_diff, rel_cos_diff = rel_next_sin - rel_sin, rel_next_cos - rel_cos
+            relative_object_delta_sc = torch.stack((rel_sin_diff, rel_cos_diff), dim=1)
+
+            relative_object_delta_xysc = torch.cat((relative_object_delta_xy, relative_object_delta_sc), dim=1)
+            relative_state_delta_xysc = torch.cat((relative_robot_delta_xysc, relative_object_delta_xysc), dim=1)
+        else:
+            relative_state_delta_xysc = relative_robot_delta_xysc
+
+        return relative_state_delta_xysc
+
+    def next_state_from_relative_delta(self, state, relative_state_delta):
+        state, relative_state_delta = as_tensor(state, relative_state_delta)
+
+        robot_xy, robot_heading = state[:, :2], state[:, 2]
+        relative_robot_delta_xy = relative_state_delta[:, :2]
+        relative_robot_delta_sc = relative_state_delta[:, 2:4]
+
+        sin, cos = torch.sin(robot_heading), torch.cos(robot_heading)
+        rotation = torch.stack((torch.stack((cos, -sin)),
+                                torch.stack((sin, cos)))).permute(2, 0, 1)
+        absolute_robot_delta_xy = (rotation @ relative_robot_delta_xy[:, :, None]).squeeze()
+        absolute_next_robot_xy = robot_xy + absolute_robot_delta_xy
+
+        rel_delta_sin, rel_delta_cos = relative_robot_delta_sc[:, 0], relative_robot_delta_sc[:, 1]
+        absolute_robot_delta_heading = torch.atan2(rel_delta_sin, rel_delta_cos)
+        absolute_next_robot_heading = (robot_heading + absolute_robot_delta_heading) % (2 * torch.pi)
+
+        next_robot_state = torch.cat((absolute_next_robot_xy, absolute_next_robot_heading[:, None]), dim=1)
+
+        if self.use_object:
+            object_xy, object_heading = state[:, 3:5], state[:, 5]
+            relative_object_delta_xy = relative_state_delta[:, 4:6]
+            relative_object_delta_sc = relative_state_delta[:, 6:8]
+
+            sin, cos = torch.sin(-robot_heading), torch.cos(-robot_heading)
+            reverse_rotation = torch.stack((torch.stack((cos, -sin)),
+                                            torch.stack((sin, cos)))).permute(2, 0, 1)
+            absolute_object_to_robot_xy = robot_xy - object_xy
+            relative_object_to_robot_xy = (reverse_rotation @ absolute_object_to_robot_xy[:, :, None]).squeeze()
+            relative_next_object_to_robot_xy = relative_object_to_robot_xy + relative_object_delta_xy
+            absolute_next_object_to_robot_xy = (rotation @ relative_next_object_to_robot_xy[:, :, None]).squeeze()
+            absolute_next_object_xy = robot_xy - absolute_next_object_to_robot_xy
+
+            relative_object_heading = signed_angle_difference(object_heading, robot_heading)
+            rel_sin, rel_cos = torch.sin(relative_object_heading), torch.cos(relative_object_heading)
+            relative_object_sc = torch.stack((rel_sin, rel_cos), dim=1)
+            relative_next_object_sc = relative_object_sc + relative_object_delta_sc
+            rel_next_sin, rel_next_cos = relative_next_object_sc[:, 0], relative_next_object_sc[:, 1]
+            relative_next_object_heading = torch.atan2(rel_next_sin, rel_next_cos)
+            absolute_next_object_heading = (relative_next_object_heading + robot_heading) % (2 * torch.pi)
+
+            next_object_state = torch.cat((absolute_next_object_xy, absolute_next_object_heading[:, None]), dim=1)
+            next_state = torch.cat((next_robot_state, next_object_state), dim=1)
+        else:
+            next_state = next_robot_state
 
         return next_state

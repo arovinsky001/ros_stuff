@@ -45,20 +45,15 @@ class DynamicsNetwork(nn.Module):
     def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
         states, actions = as_tensor(states, actions)
 
-        if len(states.shape) == 1:
-            states = states[None, :]
         if len(actions.shape) == 1:
             actions = actions[None, :]
 
-        # state comes in as (x, y, theta)
-        input_states = self.dtu.state_to_model_input(states)
-        inputs = torch.cat([input_states, actions], dim=1).float()
         if self.scale:
-            inputs = self.standardize_input(inputs)
+            actions = self.standardize_input(actions)
 
         if params is not None:
             # metalearning forward pass
-            x = inputs
+            x = actions
             for i in range(self.hidden_depth + 1):
                 w, b = params[2*i], params[2*i+1]
                 x = F.relu(F.linear(x, w, b))
@@ -67,7 +62,7 @@ class DynamicsNetwork(nn.Module):
             outputs = F.linear(x, w, b)
         else:
             # standard forward pass
-            outputs = self.net(inputs)
+            outputs = self.net(actions)
 
         if self.dist:
             mean = outputs
@@ -85,20 +80,19 @@ class DynamicsNetwork(nn.Module):
         if delta:
             return state_deltas_model
 
-        next_states_model = self.dtu.compute_next_state(states, state_deltas_model)
+        next_states_model = self.dtu.next_state_from_relative_delta(states, state_deltas_model)
         return next_states_model
 
     def update(self, state, action, next_state):
         self.train()
         state, action, next_state = as_tensor(state, action, next_state)
-        state_delta = self.dtu.state_delta_xysc(state, next_state).detach()
-        state, action, state_delta = apply_yaw_perturbations(state, action, next_state, state_delta)
+        state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
         if self.dist:
             if self.scale:
                 state_delta = self.standardize_output(state_delta)
             dist = self(state, action, return_dist=True)
-            loss = -dist.log_prob(state_delta).mean()
+            loss = -dist.log_prob(state_delta.detach()).mean()
         else:
             pred_state_delta = self(state, action, delta=True)
             loss = F.mse_loss(pred_state_delta, state_delta, reduction='mean')
@@ -112,7 +106,7 @@ class DynamicsNetwork(nn.Module):
     def update_meta(self, state, action, next_state):
         self.train()
         state, action, next_state = as_tensor(state, action, next_state)
-        state_delta = self.dtu.state_delta_xysc(state, next_state)
+        state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
         # chunk into "tasks" i.e. batches continuous in time
         tasks = 20
@@ -176,13 +170,10 @@ class DynamicsNetwork(nn.Module):
 
     def set_scalers(self, state, action, next_state):
         state, action, next_state = as_tensor(state, action, next_state)
-        input_state = self.dtu.state_to_model_input(state)
+        state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
-        state_action = torch.cat([input_state, action], axis=1)
-        state_delta = self.dtu.state_delta_xysc(state, next_state)
-
-        self.input_mean = state_action.mean(dim=0)
-        self.input_std = state_action.std(dim=0)
+        self.input_mean = action.mean(dim=0)
+        self.input_std = action.std(dim=0)
 
         self.output_mean = state_delta.mean(dim=0)
         self.output_std = state_delta.std(dim=0)
