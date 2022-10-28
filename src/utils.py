@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-# from ros_stuff.msg import RobotCmd
+from ros_stuff.msg import RobotCmd
 
 
 dimensions = {
@@ -158,18 +158,27 @@ class DataUtils:
             else:
                 state = [sin(theta), cos(theta)]
         """
-        state = as_tensor(state)
-
-        robot_xy, robot_theta = state[:, :2], state[:, 2]
-        robot_sc = full_state = torch.stack((torch.sin(robot_theta), torch.cos(robot_theta)), dim=1)
-
         if self.use_object:
-            object_xy, object_theta = state[:, 3:5], state[:, 5]
-            obj_to_robot_xy = robot_xy - object_xy
-            object_sc = torch.stack((torch.sin(object_theta), torch.cos(object_theta)), dim=1)
-            full_state = torch.cat((robot_sc, obj_to_robot_xy, object_sc), dim=1)
+            state = as_tensor(state)
 
-        return full_state
+            robot_xy, robot_heading = state[:, :2], state[:, 2]
+            object_xy, object_heading = state[:, 3:5], state[:, 5]
+
+            sin, cos = torch.sin(-robot_heading), torch.cos(-robot_heading)
+            rotation = torch.stack((torch.stack((cos, -sin)),
+                                    torch.stack((sin, cos)))).permute(2, 0, 1)
+            absolute_object_to_robot_xy = robot_xy - object_xy
+            relative_object_to_robot_xy = (rotation @ absolute_object_to_robot_xy[:, :, None]).squeeze(dim=-1)
+
+            relative_object_heading = signed_angle_difference(object_heading, robot_heading)
+            rel_sin, rel_cos = torch.sin(relative_object_heading), torch.cos(relative_object_heading)
+            relative_object_sc = torch.stack((rel_sin, rel_cos), dim=1)
+
+            relative_state = torch.cat((relative_object_to_robot_xy, relative_object_sc), dim=1)
+
+            return relative_state
+        else:
+            return None
 
     def state_delta_xysc(self, state, next_state):
         """

@@ -39,13 +39,12 @@ class Logger:
         self.object_or_robot = 'object' if self.use_object else 'robot'
 
     def log_performance_metrics(self, costs, actions):
-        dist_costs, heading_costs, perp_costs, total_costs = costs.T
+        dist_costs, heading_costs, total_costs = costs.T
         data = np.array([[dist_costs.mean(), dist_costs.std(), dist_costs.min(), dist_costs.max()],
-                         [perp_costs.mean(), perp_costs.std(), perp_costs.min(), perp_costs.max()],
                          [heading_costs.mean(), heading_costs.std(), heading_costs.min(), heading_costs.max()],
                          [total_costs.mean(), total_costs.std(), total_costs.min(), total_costs.max()]])
 
-        print("rows: (dist, perp, heading, total)")
+        print("rows: (dist, heading, total)")
         print("cols: (mean, std, min, max)")
         print("DATA:", data, "\n")
 

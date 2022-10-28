@@ -14,16 +14,17 @@ class MPCPolicy:
         else:
             self.action_range = action_range
 
-    def compute_total_costs(self, cost_weights_dict, predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals):
-        cost_dict = self.compute_costs(predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals=robot_goals)
+    def compute_total_costs(self, cost_weights_dict, predicted_state_sequence, sampled_actions, goals, robot_goals):
+        cost_dict = self.compute_costs(predicted_state_sequence, sampled_actions, goals, robot_goals=robot_goals)
+        ensemble_size, n_samples, horizon, _ = predicted_state_sequence.shape
 
-        ensemble_costs = np.zeros(predicted_state_sequence.shape[:-1])
+        ensemble_costs = np.zeros((ensemble_size, n_samples, horizon))
         for cost_type in cost_dict:
             ensemble_costs += cost_dict[cost_type] * cost_weights_dict[cost_type]
 
         # discount costs through time
-        # discount = 0.9 ** np.arange(horizon)
-        # ensemble_costs *= discount[None, None, :]
+        discount = (1 - 1 / (4 * horizon)) ** np.arange(horizon)
+        ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
         total_costs = ensemble_costs.mean(axis=(0, 2))
@@ -40,14 +41,14 @@ class RandomShootingPolicy(MPCPolicy):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def get_action(self, initial_state, prev_goal, goal, cost_weights_dict, params):
+    def get_action(self, initial_state, goals, cost_weights_dict, params):
         horizon = params["horizon"]
         n_samples = params["sample_trajectories"]
         robot_goals = params["robot_goals"]
 
         sampled_actions = np.random.uniform(*self.action_range, size=(n_samples, horizon, self.action_dim))
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-        total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals)
+        total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, goals, robot_goals)
 
         best_idx = total_costs.argmin()
         best_action = sampled_actions[best_idx, 0]
@@ -60,7 +61,7 @@ class CEMPolicy(MPCPolicy):
     def __init__(self, **kwargs):
         return super().__init__(**kwargs)
 
-    def get_action(self, initial_state, prev_goal, goal, cost_weights_dict, params):
+    def get_action(self, initial_state, goals, cost_weights_dict, params):
         horizon = params["horizon"]
         n_samples = params["sample_trajectories"]
         refine_iters = params["refine_iters"]
@@ -79,7 +80,7 @@ class CEMPolicy(MPCPolicy):
                 sampled_actions = sampled_actions.reshape(n_samples, horizon, self.action_dim)
 
             predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-            total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals)
+            total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, goals, robot_goals)
 
             action_trajectories = sampled_actions.reshape((n_samples, action_trajectory_dim))
             best_costs_idx = np.argsort(-total_costs)[-n_best:]
@@ -104,7 +105,7 @@ class MPPIPolicy(MPCPolicy):
         self.trajectory_mean = None
         return super().__init__(**kwargs)
 
-    def get_action(self, initial_state, prev_goal, goal, cost_weights_dict, params):
+    def get_action(self, initial_state, goals, cost_weights_dict, params):
         horizon = params["horizon"]
         n_samples = params["sample_trajectories"]
         beta = params["beta"]
@@ -131,7 +132,7 @@ class MPPIPolicy(MPCPolicy):
 
         sampled_actions = np.clip(sampled_actions, *self.action_range)
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-        total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, prev_goal, goal, robot_goals)
+        total_costs = self.compute_total_costs(cost_weights_dict, predicted_state_sequence, sampled_actions, goals, robot_goals)
 
         action_trajectories = sampled_actions.reshape((n_samples, -1))
 
@@ -140,6 +141,9 @@ class MPPIPolicy(MPCPolicy):
         self.trajectory_mean = weighted_trajectories / weights.sum()
 
         best_action = self.trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
+
+        # if np.linalg.norm(best_action) < np.sqrt(2) * 0.5:
+        #     import pdb;pdb.set_trace()
 
         return best_action, predicted_next_state

@@ -19,6 +19,7 @@ class MPCAgent:
         self.state_dim = dimensions["state_dim"]
 
         if use_object:
+            input_dim += dimensions["object_input_dim"]
             output_dim += dimensions["object_output_dim"]
             self.state_dim += dimensions["state_dim"]
 
@@ -47,8 +48,8 @@ class MPCAgent:
     def model(self):
         return self.models[0]
 
-    def get_action(self, state, prev_goal, goal, cost_weights, params):
-        return self.policy.get_action(state, prev_goal, goal, cost_weights, params)
+    def get_action(self, state, goals, cost_weights, params):
+        return self.policy.get_action(state, goals, cost_weights, params)
 
     def simulate(self, initial_state, action_sequence):
         n_samples, horizon, _ = action_sequence.shape
@@ -64,30 +65,30 @@ class MPCAgent:
                     else:
                         state_sequence[i, :, t] = model(state_sequence[i, :, t-1], action, sample=False, delta=False)
 
+        if n_samples > 1:
+            if np.linalg.norm(state_sequence[0, 0] - state_sequence[0, 1]) == 0:
+                import pdb;pdb.set_trace()
+
         return state_sequence
 
-    def compute_costs(self, state, action, prev_goal, goal, robot_goals=False, signed=False):
-        # separation cost
+    def compute_costs(self, state, action, goals, robot_goals=False, signed=False):
         if self.use_object:
             robot_state = state[:, :, :, :dimensions["state_dim"]]
             object_state = state[:, :, :, dimensions["state_dim"]:2*dimensions["state_dim"]]
-            object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
-            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
 
             effective_state = robot_state if robot_goals else object_state
         else:
             effective_state = state[:, :, :, :dimensions["state_dim"]]
-            sep_cost = np.array([0.])
 
         x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
-        vec_to_goal = (goal - effective_state)[:, :, :, :-1]
+        vec_to_goal = (goals - effective_state)[:, :, :, :-1]
 
-        # dist cost
+        # distance from goal position cost
         dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
         if signed:
             dist_cost *= forward
 
-        # heading cost
+        # difference between current and goal heading cost
         target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
         heading_cost = signed_angle_difference(target_angle, current_angle)
 
@@ -102,19 +103,14 @@ class MPCAgent:
         else:
             heading_cost = np.abs(heading_cost)
 
-        # heading_cost[np.abs(dist_cost) < 0.015] = 0.
+        # object-robot separation cost
+        if self.use_object:
+            object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
+            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
+        else:
+            sep_cost = np.array([0.])
 
-        # perp cost
-        x1, y1, _ = prev_goal
-        x2, y2, _ = goal
-        perp_denom = np.linalg.norm((goal - prev_goal)[:2])
-
-        perp_cost = (((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / perp_denom)
-
-        if not signed:
-            perp_cost = np.abs(perp_cost)
-
-        # object vs. robot heading cost
+        # object-robot heading difference cost
         if self.use_object:
             robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
             heading_diff = (robot_theta - object_theta) % (2 * np.pi)
@@ -128,7 +124,6 @@ class MPCAgent:
         cost_dict = {
             "distance": dist_cost,
             "heading": heading_cost,
-            "perpendicular": perp_cost,
             "action_norm": norm_cost,
             "separation": sep_cost,
             "heading_difference": heading_diff_cost,

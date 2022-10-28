@@ -36,3 +36,14 @@ class ReplayBuffer:
         next_states = self.next_states[sample_idx]
 
         return states, actions, next_states
+
+    # assumes buffer never fills up/wraps
+    def sample_recent(self, sample_size):
+        idxs = np.arange(self.size)
+        sample_idx = idxs[-sample_size:]
+
+        states = self.states[sample_idx]
+        actions = self.actions[sample_idx]
+        next_states = self.next_states[sample_idx]
+
+        return states, actions, next_states

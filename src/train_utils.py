@@ -93,7 +93,8 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
           use_all_data=False, meta=False):
     state, action, next_state = as_tensor(state, action, next_state)
     if validation_buffer is not None:
-        val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
+        print("\nUSING VALIDATION BUFFER\n")
+        val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.size)
         val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
         val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
@@ -166,16 +167,17 @@ def train(agent, state, action, next_state, validation_buffer=None, epochs=5, ba
     if meta:
         for g in model.optimizer.param_groups:
             # g['lr'] = model.update_lr
-            g['lr'] = torch.clamp(model.update_lr, 1e-3, 1)
+            g['lr'] = torch.clamp(model.update_lr, 1e-4, 1)
+            print("\nUPDATE LEARNING RATE:", model.update_lr)
 
-        losses = []
-        for i in range(100):
-            model.update(train_state[:20], train_action[:20], train_next_state[:20])
-            pred_state_delta = model(val_state, val_action, sample=False, delta=True)
-            losses.append(dcn(F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')))
+        # losses = []
+        # for i in range(100):
+        #     model.update(train_state[:20], train_action[:20], train_next_state[:20])
+        #     pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+        #     losses.append(dcn(F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')))
 
-        print("\nMIN META TEST ITER:", np.argmin(losses))
-        print("MIN META TEST LOSS:", np.min(losses), "\n")
+        # print("\nMIN META TEST ITER:", np.argmin(losses))
+        # print("MIN META TEST LOSS:", np.min(losses), "\n")
 
     model.eval()
     return train_losses, test_losses, test_idx

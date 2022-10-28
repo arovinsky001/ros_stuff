@@ -31,7 +31,6 @@ class StatePublisher:
         # compute velocity based on most recent 3 states
         self.id_to_state = {id: np.zeros(3) for id in self.name_to_id.values()}
         self.id_to_past_states_stamped = {id: np.empty((3, 4)) for id in self.name_to_id.values()}
-        self.object_to_robot_state = np.zeros(3)
 
         rospy.init_node("state_publisher")
 
@@ -65,17 +64,6 @@ class StatePublisher:
                     camera_frame_pose = marker.pose
                     camera_frame_pose.header.frame_id = WORLD_FRAME
 
-                    if marker.id == self.name_to_id["object"]:
-                        # get object pose relative to robot
-                        robot_transform = self.tf_buffer.lookup_transform(self.robot_frame, WORLD_FRAME, rospy.Time(0))
-                        pose = tf2_geometry_msgs.do_transform_pose(camera_frame_pose, robot_transform).pose
-
-                        p, o = pose.position, pose.orientation
-                        quat = [o.x, o.y, o.z, o.w]
-                        roll, pitch, yaw = euler_from_quaternion(quat)
-
-                        self.object_to_robot_state[:] = (p.x, p.y, yaw)
-
                     # get robot or corner pose relative to base frame
                     base_transform = self.tf_buffer.lookup_transform(self.base_frame, WORLD_FRAME, rospy.Time(0))
                     pose = tf2_geometry_msgs.do_transform_pose(camera_frame_pose, base_transform).pose
@@ -100,7 +88,6 @@ class StatePublisher:
         rs = pub_msg.robot_state = SingleState()
         os = pub_msg.object_state = SingleState()
         cs = pub_msg.corner_state = SingleState()
-        ors = pub_msg.object_to_robot_state = SingleState()
 
         robot_pos = self.id_to_state[self.name_to_id["robot"]].copy()
         object_pos = self.id_to_state[self.name_to_id["object"]].copy()
@@ -109,7 +96,6 @@ class StatePublisher:
         rs.x, rs.y, rs.yaw = robot_pos
         os.x, os.y, os.yaw = object_pos
         cs.x, cs.y, cs.yaw = corner_pos
-        ors.x, ors.y, ors.yaw = self.object_to_robot_state
 
         robot_vel, object_vel = self.compute_vel_from_past_states()
         rs.x_vel, rs.y_vel, rs.yaw_vel = robot_vel

@@ -24,10 +24,10 @@ np.random.seed(SEED)
 
 
 class Experiment():
-    def __init__(self, robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel,
+    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel,
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
-                 online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, rate, use_all_data, debug,
+                 online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, use_all_data, debug,
                  save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, rand_ac_mean,
                  meta, warmup_test, **kwargs):
         # flags for different stages of eval
@@ -50,24 +50,23 @@ class Experiment():
             "robot": robot_pos,
             "object": object_pos,
             "corner": corner_pos,
-            "object_to_robot": object_to_robot_pos,
         }
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
-        self.gradient_steps = 3
+        self.gradient_steps = 1
         self.online = online
         self.save_freq = save_freq
         self.pretrain_samples = pretrain_samples
 
         # system params
-        self.rate = rate
         self.debug = debug
         self.use_object = (self.object_id >= 0)
         self.duration = 0.4 if self.use_object else 0.2
         self.action_range = np.array([[-1, -1], [1, 1]]) * 0.999
         self.rand_ac_mean = rand_ac_mean
-        self.post_action_sleep_time = 0.3
+        self.post_action_sleep_time = 0.2
+        self.max_vel_magnitude = 0.1
 
         # train params
         self.pretrain = pretrain
@@ -89,13 +88,15 @@ class Experiment():
         self.do_warmup_test = warmup_test
         self.start_lap_time = np.random.rand() * lap_time
         self.reverse_lap = False
+        self.out_of_bounds = False
         self.predicted_next_state = np.zeros(6) if self.use_object else np.zeros(3)
 
         if not robot_goals:
             assert self.use_object
 
         self.all_actions = []
-        self.costs = np.empty((0, 4))      # dist, heading, perp, total
+        self.n_costs = 3
+        self.costs = np.empty((0, self.n_costs))      # dist, heading, total
 
         self.logger = Logger(self, plot, corner_pos, **kwargs)
         self.replay_buffer, self.validation_buffer = self.logger.load_buffer(robot_id)
@@ -129,7 +130,6 @@ class Experiment():
             self.cost_weights = {
                 "distance": 1.,
                 "heading": 0.,
-                "perpendicular": 0.,
                 "action_norm": 0.,
                 "distance_bonus": 0.,
                 "separation": 0.,
@@ -140,7 +140,6 @@ class Experiment():
             self.cost_weights = {
                 "distance": 1.,
                 "heading": 0.,
-                "perpendicular": 0.,
                 "action_norm": 0.,
                 "distance_bonus": 0.,
                 "separation": 0.,
@@ -174,7 +173,7 @@ class Experiment():
             with open(AGENT_PATH, "rb") as f:
                 self.agent = pkl.load(f)
         else:
-            self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=True, scale=self.scale,
+            self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=False, scale=self.scale,
                                   hidden_dim=200, hidden_depth=1, lr=0.001, std=0.1,
                                   ensemble=ensemble, use_object=self.use_object,
                                   action_range=self.action_range)
@@ -195,35 +194,41 @@ class Experiment():
 
         self.take_warmup_steps()
 
-        r = rospy.Rate(self.rate)
         while not rospy.is_shutdown():
             t = rospy.get_time()
 
             if not self.started and self.dist_to_start() < self.tolerance \
                         and (self.pretrain or self.replay_buffer.size >= self.random_steps):
                 self.started = True
-                self.prev_goal = self.get_goal()
 
             state, action = self.step()
-            self.logger.log_states(self.state_dict, self.prev_goal, self.started)
+            self.logger.log_states(self.state_dict, self.get_goal(), self.started)
 
             if self.done:
                 rospy.signal_shutdown("Finished! All robots reached goal.")
                 return
 
-            r.sleep()
             print("TIME:", rospy.get_time() - t)
 
             if not self.debug:
-                next_state = self.get_state()
-                self.collect_training_data(state, action, next_state)
+                if self.out_of_bounds:
+                    self.out_of_bounds = False
+                else:
+                    next_state = self.get_state()
+                    self.collect_training_data(state, action, next_state)
 
-                prediction_error = np.array([
+                robot_prediction_error = np.array([
                     np.linalg.norm((next_state - self.predicted_next_state)[:2]),
                     signed_angle_difference(next_state[2], self.predicted_next_state[2]),
                 ])
+                print("\nROBOT PREDICTION ERROR (distance, heading):", robot_prediction_error)
 
-                print("\nPREDICTION ERROR (distance, heading):", prediction_error, "\n")
+                if self.use_object:
+                    object_prediction_error = np.array([
+                        np.linalg.norm((next_state - self.predicted_next_state)[3:5]),
+                        signed_angle_difference(next_state[5], self.predicted_next_state[5]),
+                    ])
+                    print("OBJECT PREDICTION ERROR (distance, heading):", object_prediction_error, "\n")
 
             if self.online:
                 self.update_model_online()
@@ -252,7 +257,7 @@ class Experiment():
         if self.debug:
             return
 
-        for _ in trange(10, desc="Warmup Steps"):
+        for _ in trange(5, desc="Warmup Steps"):
             idx = np.random.randint(0, 2)
             negate = np.random.randint(0, 2)
             actions = np.array([[1, 1], [1, -1]]) * 0.999
@@ -264,34 +269,33 @@ class Experiment():
 
     def get_state(self):
         robot_pos = self.state_dict["robot"].copy()
-        object_to_robot = self.state_dict["object_to_robot"].copy()
+        object_pos = self.state_dict["object"].copy()
         corner_pos = self.state_dict["corner"].copy()
 
         if np.any(robot_pos[:2] > corner_pos[:2]) or np.any(robot_pos[:2] < 0):
             print("\nOUT OF BOUNDS\n")
+            self.out_of_bounds = True
             import pdb;pdb.set_trace()
 
         # apply yaw offset
         robot_pos[2] = (robot_pos[2] + self.yaw_offsets[self.robot_id]) % (2 * np.pi)
 
         if self.use_object:
-            object_to_robot[2] = (object_to_robot[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
+            object_pos[2] = (object_pos[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
 
-            return np.concatenate((robot_pos, object_to_robot), axis=0)
+            return np.concatenate((robot_pos, object_pos), axis=0)
         else:
             return robot_pos
 
     def get_take_action(self, state):
-        goal = self.get_goal()
-        state_for_prev_goal = state[:dimensions["state_dim"]] if self.robot_goals else state[dimensions["state_dim"]:]
-        prev_goal = self.prev_goal if self.started else state_for_prev_goal
-        prev_goal = state_for_prev_goal
+        goals = self.get_next_n_goals(self.mpc_params["horizon"])
+        curr_goal = goals[0]
+        robot_or_object_state = state[:dimensions["state_dim"]] if self.robot_goals else state[dimensions["state_dim"]:]
 
         if self.replay_buffer.size >= self.random_steps:
             action, self.predicted_next_state = self.agent.get_action(
                 state,
-                prev_goal,
-                goal,
+                goals,
                 cost_weights=self.cost_weights,
                 params=self.mpc_params
             )
@@ -312,6 +316,9 @@ class Experiment():
             # actions = np.stack((left, right)).transpose(2, 1, 0).reshape(-1, 2)
             # action = actions[self.replay_buffer.size]
 
+        if np.any(np.isnan(action)):
+            import pdb;pdb.set_trace()
+
         action = np.clip(action, *self.action_range)
         action_req = build_action_request(action, self.duration)
 
@@ -319,26 +326,27 @@ class Experiment():
             print("SENDING ACTION")
             self.service_proxy(action_req, f"kami{self.robot_id}")
             rospy.sleep(self.post_action_sleep_time)
+            while np.linalg.norm(self.robot_vel[:2] > self.max_vel_magnitude) or \
+                np.linalg.norm(self.object_vel[:2] > self.max_vel_magnitude):
+                rospy.sleep(0.05)
 
         print(f"\n\n\n\nNO. {self.steps}")
         print("/////////////////////////////////////////////////")
         print("=================================================")
-        print("GOAL:", goal)
+        print("GOAL:", curr_goal)
         print("STATE:", state)
         print("ACTION:", action)
         print("ACTION NORM:", np.linalg.norm(action) / np.sqrt(2), "\n")
 
-        cost_dict, total_cost = self.record_costs(prev_goal, goal)
+        cost_dict, total_cost = self.record_costs(curr_goal)
 
         for cost_type, cost in cost_dict.items():
             print(f"{cost_type}: {cost}")
-        print("TOTAL:", total_cost)
+        # print("TOTAL:", total_cost)
 
         print("\nREPLAY BUFFER SIZE:", self.replay_buffer.size)
         print("=================================================")
         print("/////////////////////////////////////////////////")
-
-        self.prev_goal = goal.copy()
 
         return action
 
@@ -368,17 +376,21 @@ class Experiment():
     def define_goal_trajectory(self):
         rospy.sleep(0.2)        # wait for states to be published and set
 
-        back_circle_center_rel = np.array([0.7, 0.5])
-        front_circle_center_rel = np.array([0.4, 0.5])
+        if self.robot_goals:
+            back_circle_center_rel = np.array([0.7, 0.5])
+            front_circle_center_rel = np.array([0.4, 0.5])
+        else:
+            back_circle_center_rel = np.array([0.65, 0.5])
+            front_circle_center_rel = np.array([0.4, 0.5])
 
         corner_pos = self.state_dict["corner"].copy()
         self.back_circle_center = back_circle_center_rel * corner_pos[:2]
         self.front_circle_center = front_circle_center_rel * corner_pos[:2]
         self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
 
-    def record_costs(self, prev_goal, goal):
+    def record_costs(self, goal):
         cost_dict = self.agent.compute_costs(
-                self.get_state()[None, None, None, :], np.array([[[[0., 0.]]]]), prev_goal, goal, robot_goals=self.robot_goals
+                self.get_state()[None, None, None, :], np.array([[[[0., 0.]]]]), goal[None, :], robot_goals=self.robot_goals
                 )
 
         total_cost = 0
@@ -389,7 +401,7 @@ class Experiment():
         total_cost = (total_cost + self.cost_weights["distance"]) * cost_dict["distance"]
 
         if self.started:
-            costs_to_record = np.array([[cost_dict["distance"], cost_dict["heading"], cost_dict["perpendicular"], total_cost]])
+            costs_to_record = np.array([[cost_dict["distance"], cost_dict["heading"], total_cost]])
             self.costs = np.append(self.costs, costs_to_record, axis=0)
 
         return cost_dict, total_cost
@@ -415,19 +427,27 @@ class Experiment():
             center = self.back_circle_center
 
         goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
-        return np.block([goal, 0.0])
+        return np.block([goal, 0.])
+
+    def get_next_n_goals(self, n):
+        goals = np.empty((n, 3))
+
+        for i in range(n):
+            t = self.time_elapsed + i * self.duration * (-1 if self.reverse_lap else 1)
+            goals[i] = self.get_goal(time_override=t)
+
+        return goals
 
     def check_rollout_finished(self):
         if np.abs(self.time_elapsed) > self.lap_time:
             self.laps += 1
             # Print current cumulative loss per lap completed
-            dist_costs, heading_costs, perp_costs, total_costs = self.costs.T
+            dist_costs, heading_costs, total_costs = self.costs.T
             data = np.array([[dist_costs.mean(), dist_costs.std(), dist_costs.min(), dist_costs.max()],
-                         [perp_costs.mean(), perp_costs.std(), perp_costs.min(), perp_costs.max()],
                          [heading_costs.mean(), heading_costs.std(), heading_costs.min(), heading_costs.max()],
                          [total_costs.mean(), total_costs.std(), total_costs.min(), total_costs.max()]])
             print("lap:", self.laps)
-            print("rows: (dist, perp, heading, total)")
+            print("rows: (dist, heading, total)")
             print("cols: (mean, std, min, max)")
             print("DATA:", data, "\n")
             self.time_elapsed = 0.
@@ -441,7 +461,7 @@ class Experiment():
 
             if self.online:
                 self.logger.dump_agent(self.agent, self.laps, self.replay_buffer)
-                self.costs = np.empty((0, 4))
+                self.costs = np.empty((0, self.n_costs))
             elif(not self.online and self.laps == self.n_rollouts):
                 self.logger.dump_agent(self.agent, self.laps, self.replay_buffer)
 
@@ -462,7 +482,10 @@ class Experiment():
         if self.replay_buffer.size >= self.random_steps:
             for model in self.agent.models:
                 for _ in range(self.gradient_steps):
-                    states, actions, next_states = self.replay_buffer.sample(self.batch_size)
+                    if self.meta:
+                        states, actions, next_states = self.replay_buffer.sample_recent(30)
+                    else:
+                        states, actions, next_states = self.replay_buffer.sample(self.batch_size)
                     model.update(states, actions, next_states)
 
     def warmup_test(self):
@@ -516,17 +539,15 @@ def main(args):
     robot_pos = np.empty(pos_dim)
     object_pos = np.empty(pos_dim)
     corner_pos = np.empty(pos_dim)
-    object_to_robot_pos = np.empty(pos_dim)
     robot_vel = np.empty(vel_dim)
     object_vel = np.empty(vel_dim)
 
     def update_state(msg):
-        rs, os, cs, ors = msg.robot_state, msg.object_state, msg.corner_state, msg.object_to_robot_state
+        rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
 
         robot_pos[:] = np.array([rs.x, rs.y, rs.yaw])
         object_pos[:] = np.array([os.x, os.y, os.yaw])
         corner_pos[:] = np.array([cs.x, cs.y, cs.yaw])
-        object_to_robot_pos[:] = np.array([ors.x, ors.y, ors.yaw])
 
         robot_vel[:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
         object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
@@ -535,7 +556,7 @@ def main(args):
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    experiment = Experiment(robot_pos, object_pos, corner_pos, object_to_robot_pos, robot_vel, object_vel, **vars(args))
+    experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, **vars(args))
     experiment.run()
 
 
@@ -562,14 +583,13 @@ if __name__ == '__main__':
     parser.add_argument('-save_freq', type=int, default=50)
     parser.add_argument('-pretrain_samples', type=int, default=500)
     parser.add_argument('-random_steps', type=int, default=500)
-    parser.add_argument('-rate', type=float, default=1.)
     parser.add_argument('-use_all_data', action='store_true')
     parser.add_argument('-debug', action='store_true')
     parser.add_argument('-save_agent', action='store_true')
     parser.add_argument('-load_agent', action='store_true')
     parser.add_argument('-train_epochs', type=int, default=200)
     parser.add_argument('-ensemble', type=int, default=1)
-    parser.add_argument('-batch_size', type=int, default=1000)
+    parser.add_argument('-batch_size', type=int, default=10000)
     parser.add_argument('-rand_ac_mean', type=float, default=0.)
     parser.add_argument('-rand_rot', action='store_true')
     parser.add_argument('-exp_name')

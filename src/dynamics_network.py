@@ -16,6 +16,7 @@ class DynamicsNetwork(nn.Module):
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
+            hidden_layers += [nn.Dropout(p=0.05)]
 
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
@@ -45,15 +46,24 @@ class DynamicsNetwork(nn.Module):
     def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
         states, actions = as_tensor(states, actions)
 
+        if len(states.shape) == 1:
+            states = states[None, :]
         if len(actions.shape) == 1:
             actions = actions[None, :]
 
+        # state comes in as (x, y, theta)
+        input_states = self.dtu.state_to_model_input(states)
+        if input_states is None:
+            inputs = actions.float()
+        else:
+            inputs = torch.cat([input_states, actions], dim=1).float()
+
         if self.scale:
-            actions = self.standardize_input(actions)
+            inputs = self.standardize_input(inputs)
 
         if params is not None:
             # metalearning forward pass
-            x = actions
+            x = inputs
             for i in range(self.hidden_depth + 1):
                 w, b = params[2*i], params[2*i+1]
                 x = F.relu(F.linear(x, w, b))
@@ -62,7 +72,7 @@ class DynamicsNetwork(nn.Module):
             outputs = F.linear(x, w, b)
         else:
             # standard forward pass
-            outputs = self.net(actions)
+            outputs = self.net(inputs)
 
         if self.dist:
             mean = outputs
@@ -109,9 +119,9 @@ class DynamicsNetwork(nn.Module):
         state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
         # chunk into "tasks" i.e. batches continuous in time
-        tasks = 20
-        task_steps = 10
-        meta_update_steps = 10
+        tasks = 40
+        task_steps = 30
+        meta_update_steps = 3
 
         first_idxs = torch.randint(len(state) - 2 * task_steps + 1, (tasks,))
         tiled_first_idxs = first_idxs.reshape(-1, 1).repeat(1, task_steps)
@@ -170,10 +180,16 @@ class DynamicsNetwork(nn.Module):
 
     def set_scalers(self, state, action, next_state):
         state, action, next_state = as_tensor(state, action, next_state)
+        input_state = self.dtu.state_to_model_input(state)
+
+        if input_state is None:
+            input = action
+        else:
+            input = torch.cat([input_state, action], axis=1)
         state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
-        self.input_mean = action.mean(dim=0)
-        self.input_std = action.std(dim=0)
+        self.input_mean = input.mean(dim=0)
+        self.input_std = input.std(dim=0)
 
         self.output_mean = state_delta.mean(dim=0)
         self.output_std = state_delta.std(dim=0)
