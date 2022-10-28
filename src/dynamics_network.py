@@ -11,28 +11,23 @@ class DynamicsNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=200, hidden_depth=1, lr=0.001, std=0.01, dist=True, use_object=False, scale=True):
         super(DynamicsNetwork, self).__init__()
 
-        assert hidden_depth >= 1
+        self.hidden_depth = hidden_depth
+        self.dist = dist
+        self.std = std
+        self.use_object = use_object
+        self.scale = scale
+        self.net.apply(self._init_weights)
+        self.dtu = global_dtu
+        self.update_lr = nn.parameter.Parameter(torch.tensor(lr))
 
+        assert hidden_depth >= 1
         hidden_layers = []
         for _ in range(hidden_depth):
             hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-            hidden_layers += [nn.Dropout(p=0.05)]
-
         input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
-
-        self.hidden_depth = hidden_depth
-        self.scale = scale
-        self.dist = dist
-        self.use_object = use_object
-        self.std = std
-        self.input_scaler = None
-        self.output_scaler = None
-        self.net.apply(self._init_weights)
-        self.dtu = global_dtu
-        self.update_lr = nn.parameter.Parameter(torch.tensor(lr))
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=lr)

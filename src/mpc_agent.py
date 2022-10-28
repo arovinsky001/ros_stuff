@@ -11,7 +11,7 @@ from utils import DataUtils, signed_angle_difference, dimensions
 class MPCAgent:
     def __init__(self, seed=1, mpc_method='mppi', hidden_dim=200, hidden_depth=2, lr=0.001,
                  std=0.01, dist=True, scale=True, ensemble=1, use_object=False,
-                 action_range=None, device=torch.device("cpu")):
+                 action_range=None, mpc_params=None, cost_weights_dict=None, device=torch.device("cpu")):
         assert ensemble > 0
 
         input_dim = dimensions["action_dim"]
@@ -24,8 +24,9 @@ class MPCAgent:
             self.state_dim += dimensions["state_dim"]
 
         self.dtu = DataUtils(use_object=use_object)
-        self.models = [DynamicsNetwork(input_dim, output_dim, self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth, lr=lr, std=std, dist=dist, use_object=use_object, scale=scale)
-                                for _ in range(ensemble)]
+        self.models = [DynamicsNetwork(input_dim, output_dim, self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth,
+                                       lr=lr, std=std, dist=dist, use_object=use_object, scale=scale)
+                        for _ in range(ensemble)]
         for model in self.models:
             model.to(device)
 
@@ -37,7 +38,8 @@ class MPCAgent:
             policy = RandomShootingPolicy
         else:
             raise NotImplementedError
-        self.policy = policy(action_range=action_range, simulate_fn=self.simulate, cost_fn=self.compute_costs)
+        self.policy = policy(action_range=action_range, simulate_fn=self.simulate, cost_fn=self.compute_costs,
+                             params=mpc_params, cost_weights_dict=cost_weights_dict)
 
         self.seed = seed
         self.scale = scale
@@ -72,24 +74,24 @@ class MPCAgent:
         return state_sequence
 
     def compute_costs(self, state, action, goals, robot_goals=False, signed=False):
+        state_dim = dimensions["state_dim"]
         if self.use_object:
-            robot_state = state[:, :, :, :dimensions["state_dim"]]
-            object_state = state[:, :, :, dimensions["state_dim"]:2*dimensions["state_dim"]]
+            robot_state = state[:, :, :, :state_dim]
+            object_state = state[:, :, :, state_dim:2*state_dim]
 
             effective_state = robot_state if robot_goals else object_state
         else:
-            effective_state = state[:, :, :, :dimensions["state_dim"]]
+            effective_state = state[:, :, :, :state_dim]
 
-        x0, y0, current_angle = effective_state.transpose(3, 0, 1, 2)
-        vec_to_goal = (goals - effective_state)[:, :, :, :-1]
-
-        # distance from goal position cost
-        dist_cost = np.linalg.norm(vec_to_goal, axis=-1)
+        # distance to goal position
+        state_to_goal_xy = (goals - effective_state)[:, :, :, :-1]
+        dist_cost = np.linalg.norm(state_to_goal_xy, axis=-1)
         if signed:
             dist_cost *= forward
 
-        # difference between current and goal heading cost
-        target_angle = np.arctan2(vec_to_goal[:, :, :, 1], vec_to_goal[:, :, :, 0])
+        # difference between current and goal heading
+        current_angle = effective_state[:, :, :, 2]
+        target_angle = np.arctan2(state_to_goal_xy[:, :, :, 1], state_to_goal_xy[:, :, :, 0])
         heading_cost = signed_angle_difference(target_angle, current_angle)
 
         left = (heading_cost > 0) * 2 - 1
@@ -103,14 +105,14 @@ class MPCAgent:
         else:
             heading_cost = np.abs(heading_cost)
 
-        # object-robot separation cost
+        # object-robot separation
         if self.use_object:
             object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
             sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
         else:
             sep_cost = np.array([0.])
 
-        # object-robot heading difference cost
+        # object-robot heading difference
         if self.use_object:
             robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
             heading_diff = (robot_theta - object_theta) % (2 * np.pi)
@@ -118,7 +120,7 @@ class MPCAgent:
         else:
             heading_diff_cost = np.array([0.])
 
-        # action norm cost
+        # action magnitude
         norm_cost = -np.linalg.norm(action, axis=-1)
 
         cost_dict = {

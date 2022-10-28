@@ -25,7 +25,7 @@ np.random.seed(SEED)
 
 class Experiment():
     def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel,
-                 robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, lap_time,
+                 robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, steps_per_lap,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, use_all_data, debug,
                  save_agent, load_agent, train_epochs, mpc_gamma, ensemble, batch_size, rand_ac_mean,
@@ -35,8 +35,8 @@ class Experiment():
         self.done = False
 
         # counters
-        self.steps = 0
-        self.time_elapsed = 0.
+        self.total_steps = 0
+        self.lap_step = 0
         self.laps = 0
 
         # AR tag ids for state lookup
@@ -80,13 +80,13 @@ class Experiment():
         # misc
         self.n_rollouts = n_rollouts
         self.tolerance = tolerance
-        self.lap_time = lap_time
+        self.steps_per_lap = steps_per_lap
         self.robot_goals = robot_goals
         self.scale = scale
         self.debug = debug
         self.meta = meta
         self.do_warmup_test = warmup_test
-        self.start_lap_time = np.random.rand() * lap_time
+        self.start_lap_step = np.floor(np.random.rand() * steps_per_lap)
         self.reverse_lap = False
         self.out_of_bounds = False
         self.predicted_next_state = np.zeros(6) if self.use_object else np.zeros(3)
@@ -126,57 +126,49 @@ class Experiment():
         self.define_goal_trajectory()
 
         # weights for MPC cost terms
-        if self.robot_goals:
-            self.cost_weights = {
-                "distance": 1.,
-                "heading": 0.,
-                "action_norm": 0.,
-                "distance_bonus": 0.,
-                "separation": 0.,
-                "heading_difference": 0.,
-            }
-        else:
-            self.cost_weights = None
-            self.cost_weights = {
-                "distance": 1.,
-                "heading": 0.,
-                "action_norm": 0.,
-                "distance_bonus": 0.,
-                "separation": 0.,
-                "heading_difference": 0.,
-            }
+        cost_weights_dict = {
+            "distance": 1.,
+            "heading": 0.,
+            "action_norm": 0.,
+            "distance_bonus": 0.,
+            "separation": 0.,
+            "heading_difference": 0.,
+        }
 
         # parameters for MPC methods
-        self.mpc_params = {
+        mpc_params = {
             "horizon": mpc_horizon,
             "sample_trajectories": mpc_samples,
             "robot_goals": robot_goals,
         }
         if mpc_method == 'mppi':
-            self.mpc_params.update({
+            mpc_params.update({
                 "beta": 0.5,
                 "gamma": mpc_gamma,
                 "noise_std": 2.,
             })
         elif mpc_method == 'cem':
-            self.mpc_params.update({
+            mpc_params.update({
                 "alpha": 0.8,
                 "n_best": 30,
                 "refine_iters": mpc_refine_iters,
             })
         elif mpc_method == 'shooting':
-            self.mpc_params.update({})
+            mpc_params.update({})
         else:
             raise NotImplementedError
 
+        # load or initialize and potentially pretrain new agent
         if load_agent:
             with open(AGENT_PATH, "rb") as f:
                 self.agent = pkl.load(f)
+            self.agent.policy.update_params_and_weights(mpc_params, cost_weights_dict)
         else:
             self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=False, scale=self.scale,
                                   hidden_dim=200, hidden_depth=1, lr=0.001, std=0.1,
                                   ensemble=ensemble, use_object=self.use_object,
-                                  action_range=self.action_range)
+                                  action_range=self.action_range, mpc_params=mpc_params,
+                                  cost_weights_dict=cost_weights_dict)
 
             if pretrain:
                 train_from_buffer(
@@ -217,18 +209,7 @@ class Experiment():
                     next_state = self.get_state()
                     self.collect_training_data(state, action, next_state)
 
-                robot_prediction_error = np.array([
-                    np.linalg.norm((next_state - self.predicted_next_state)[:2]),
-                    signed_angle_difference(next_state[2], self.predicted_next_state[2]),
-                ])
-                print("\nROBOT PREDICTION ERROR (distance, heading):", robot_prediction_error)
-
-                if self.use_object:
-                    object_prediction_error = np.array([
-                        np.linalg.norm((next_state - self.predicted_next_state)[3:5]),
-                        signed_angle_difference(next_state[5], self.predicted_next_state[5]),
-                    ])
-                    print("OBJECT PREDICTION ERROR (distance, heading):", object_prediction_error, "\n")
+                self.print_prediction_errors(next_state)
 
             if self.online:
                 self.update_model_online()
@@ -250,8 +231,22 @@ class Experiment():
 
         self.check_rollout_finished()
 
-        self.steps += 1
+        self.total_steps += 1
         return state, action
+
+    def print_prediction_errors(self, next_state):
+        robot_prediction_error = np.array([
+            np.linalg.norm((next_state - self.predicted_next_state)[:2]),
+            signed_angle_difference(next_state[2], self.predicted_next_state[2]),
+        ])
+        print("\nROBOT PREDICTION ERROR (distance, heading):", robot_prediction_error)
+
+        if self.use_object:
+            object_prediction_error = np.array([
+                np.linalg.norm((next_state - self.predicted_next_state)[3:5]),
+                signed_angle_difference(next_state[5], self.predicted_next_state[5]),
+            ])
+            print("OBJECT PREDICTION ERROR (distance, heading):", object_prediction_error, "\n")
 
     def take_warmup_steps(self):
         if self.debug:
@@ -290,17 +285,11 @@ class Experiment():
     def get_take_action(self, state):
         goals = self.get_next_n_goals(self.mpc_params["horizon"])
         curr_goal = goals[0]
-        robot_or_object_state = state[:dimensions["state_dim"]] if self.robot_goals else state[dimensions["state_dim"]:]
 
         if self.replay_buffer.size >= self.random_steps:
-            action, self.predicted_next_state = self.agent.get_action(
-                state,
-                goals,
-                cost_weights=self.cost_weights,
-                params=self.mpc_params
-            )
+            action, self.predicted_next_state = self.agent.get_action(state, goals)
 
-            self.time_elapsed += self.duration * (-1 if self.reverse_lap else 1) if self.started else 0
+            self.lap_step += (-1 if self.reverse_lap else 1) if self.started else 0
         else:
             print("TAKING RANDOM ACTION")
             # idx = self.replay_buffer.size % 2
@@ -330,7 +319,7 @@ class Experiment():
                 np.linalg.norm(self.object_vel[:2] > self.max_vel_magnitude):
                 rospy.sleep(0.05)
 
-        print(f"\n\n\n\nNO. {self.steps}")
+        print(f"\n\n\n\nNO. {self.total_steps}")
         print("/////////////////////////////////////////////////")
         print("=================================================")
         print("GOAL:", curr_goal)
@@ -411,13 +400,13 @@ class Experiment():
         state = state[:3] if self.robot_goals else state[3:]
         return np.linalg.norm((state - self.get_goal(time_override=0.))[:2])
 
-    def get_goal(self, time_override=None):
-        if time_override is not None:
-            time_elapsed = time_override
+    def get_goal(self, step_override=None):
+        if step_override is not None:
+            lap_step = step_override
         else:
-            time_elapsed = self.time_elapsed
+            lap_step = self.lap_step
 
-        t_rel = ((time_elapsed + self.start_lap_time) % self.lap_time) / self.lap_time
+        t_rel = ((lap_step + self.start_lap_step) % self.steps_per_lap) / self.steps_per_lap
 
         if t_rel < 0.5:
             theta = t_rel * 2 * 2 * np.pi
@@ -433,13 +422,13 @@ class Experiment():
         goals = np.empty((n, 3))
 
         for i in range(n):
-            t = self.time_elapsed + i * self.duration * (-1 if self.reverse_lap else 1)
-            goals[i] = self.get_goal(time_override=t)
+            step = self.lap_step + i * (-1 if self.reverse_lap else 1)
+            goals[i] = self.get_goal(step_override=step)
 
         return goals
 
     def check_rollout_finished(self):
-        if np.abs(self.time_elapsed) > self.lap_time:
+        if np.abs(self.lap_step) == self.steps_per_lap:
             self.laps += 1
             # Print current cumulative loss per lap completed
             dist_costs, heading_costs, total_costs = self.costs.T
@@ -450,10 +439,10 @@ class Experiment():
             print("rows: (dist, heading, total)")
             print("cols: (mean, std, min, max)")
             print("DATA:", data, "\n")
-            self.time_elapsed = 0.
+            self.lap_step = 0
             self.started = False
 
-            start_state = self.get_goal(time_override=0.)
+            start_state = self.get_goal(step_override=0)
             self.logger.plot_states(save=True, laps=self.laps, replay_buffer=self.replay_buffer,
                                     start_state=start_state, reverse_lap=self.reverse_lap)
             self.logger.reset_plot_states()
@@ -465,7 +454,7 @@ class Experiment():
             elif(not self.online and self.laps == self.n_rollouts):
                 self.logger.dump_agent(self.agent, self.laps, self.replay_buffer)
 
-            self.start_lap_time = np.random.rand() * self.lap_time
+            self.start_lap_step = np.floor(np.random.rand() * self.steps_per_lap)
             self.reverse_lap = not self.reverse_lap
 
         if self.laps == self.n_rollouts:
@@ -571,7 +560,7 @@ if __name__ == '__main__':
     parser.add_argument('-mpc_gamma', type=float, default=50000)
     parser.add_argument('-n_rollouts', type=int)
     parser.add_argument('-tolerance', type=float, default=0.05)
-    parser.add_argument('-lap_time', type=float)
+    parser.add_argument('-steps_per_lap', type=int)
     parser.add_argument('-calibrate', action='store_true')
     parser.add_argument('-plot', action='store_true')
     parser.add_argument('-new_buffer', action='store_true')

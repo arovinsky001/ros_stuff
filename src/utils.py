@@ -9,7 +9,6 @@ from ros_stuff.msg import RobotCmd
 dimensions = {
     "action_dim": 2,                            # left_pwm, right_pwm
     "state_dim": 3,                             # x, y, yaw
-    "robot_input_dim": 2,                       # sin(yaw), cos(yaw)
     "object_input_dim": 4,                      # x_to_robot, y_to_robot, sin(object_yaw), cos(object_yaw)
     "robot_output_dim": 4,                      # x_delta, y_delta, sin(robot_yaw), cos(robot_yaw)
     "object_output_dim": 4,                     # x_delta, y_delta, sin(object_yaw), cos(object_yaw)
