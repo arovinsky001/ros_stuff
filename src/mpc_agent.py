@@ -50,8 +50,8 @@ class MPCAgent:
     def model(self):
         return self.models[0]
 
-    def get_action(self, state, goals, cost_weights, params):
-        return self.policy.get_action(state, goals, cost_weights, params)
+    def get_action(self, state, goals):
+        return self.policy.get_action(state, goals)
 
     def simulate(self, initial_state, action_sequence):
         n_samples, horizon, _ = action_sequence.shape

@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from utils import as_tensor, dcn, apply_yaw_perturbations
+from utils import as_tensor, dcn
 
 
 class DynamicsNetwork(nn.Module):
@@ -16,7 +16,6 @@ class DynamicsNetwork(nn.Module):
         self.std = std
         self.use_object = use_object
         self.scale = scale
-        self.net.apply(self._init_weights)
         self.dtu = global_dtu
         self.update_lr = nn.parameter.Parameter(torch.tensor(lr))
 
@@ -28,6 +27,7 @@ class DynamicsNetwork(nn.Module):
         output_layer = [nn.Linear(hidden_dim, output_dim)]
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
+        self.net.apply(self._init_weights)
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=lr)

@@ -283,7 +283,7 @@ class Experiment():
             return robot_pos
 
     def get_take_action(self, state):
-        goals = self.get_next_n_goals(self.mpc_params["horizon"])
+        goals = self.get_next_n_goals(self.agent.policy.params["horizon"])
         curr_goal = goals[0]
 
         if self.replay_buffer.size >= self.random_steps:
@@ -385,9 +385,7 @@ class Experiment():
         total_cost = 0
         for cost_type, cost in cost_dict.items():
             cost_dict[cost_type] = cost.squeeze()
-            if cost_type != "distance":
-                total_cost += cost.squeeze() * self.cost_weights[cost_type]
-        total_cost = (total_cost + self.cost_weights["distance"]) * cost_dict["distance"]
+            total_cost += cost.squeeze() * self.agent.policy.cost_weights_dict[cost_type]
 
         if self.started:
             costs_to_record = np.array([[cost_dict["distance"], cost_dict["heading"], total_cost]])
@@ -398,7 +396,7 @@ class Experiment():
     def dist_to_start(self):
         state = self.get_state().squeeze()
         state = state[:3] if self.robot_goals else state[3:]
-        return np.linalg.norm((state - self.get_goal(time_override=0.))[:2])
+        return np.linalg.norm((state - self.get_goal(step_override=0))[:2])
 
     def get_goal(self, step_override=None):
         if step_override is not None:

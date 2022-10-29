@@ -133,6 +133,6 @@ class DataUtils:
             relative_next_heading = torch.atan2(rel_next_sin, rel_next_cos)
             absolute_next_heading = signed_angle_difference(relative_next_heading, -robot_heading)
 
-            next_state[:, 3*i:3*(i+1)] = torch.cat((absolute_next_xy, absolute_next_heading), dim=1)
+            next_state[:, 3*i:3*(i+1)] = torch.cat((absolute_next_xy, absolute_next_heading[:, None]), dim=1)
 
         return next_state
