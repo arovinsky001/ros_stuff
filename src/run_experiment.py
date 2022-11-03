@@ -11,10 +11,10 @@ from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import AGENT_PATH, train_from_buffer
-from utils import build_action_request, signed_angle_difference, dimensions
+from utils import build_action_msg, signed_angle_difference, dimensions
 
-from ros_stuff.msg import ProcessedStates
-from ros_stuff.srv import CommandAction
+from ros_stuff.msg import ProcessedStates, RobotCmd
+from std_msgs.msg import Time
 import tf2_ros
 
 # seed for reproducibility
@@ -24,7 +24,7 @@ np.random.seed(SEED)
 
 
 class Experiment():
-    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel,
+    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp,
                  robot_id, object_id, mpc_horizon, mpc_samples, n_rollouts, tolerance, steps_per_lap,
                  calibrate, plot, new_buffer, pretrain, robot_goals, scale, mpc_method, save_freq,
                  online, mpc_refine_iters, pretrain_samples, consecutive, random_steps, use_all_data, debug,
@@ -51,6 +51,7 @@ class Experiment():
             "object": object_pos,
             "corner": corner_pos,
         }
+        self.action_timestamp = action_timestamp
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
@@ -111,10 +112,7 @@ class Experiment():
         print("finished setting up tf buffer/listener")
 
         if not self.debug:
-            print(f"waiting for robot {self.robot_id} service")
-            rospy.wait_for_service(f"/kami{self.robot_id}/server")
-            self.service_proxy = rospy.ServiceProxy(f"/kami{self.robot_id}/server", CommandAction)
-            print("connected to robot service")
+            self.action_publisher = rospy.Publisher("/action_topic", RobotCmd, queue_size=1)
 
         self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
         if not os.path.exists(self.yaw_offset_path) or calibrate:
@@ -162,6 +160,7 @@ class Experiment():
         if load_agent:
             with open(AGENT_PATH, "rb") as f:
                 self.agent = pkl.load(f)
+
             self.agent.policy.update_params_and_weights(mpc_params, cost_weights_dict)
         else:
             self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=False, scale=self.scale,
@@ -257,10 +256,13 @@ class Experiment():
             negate = np.random.randint(0, 2)
             actions = np.array([[1, 1], [1, -1]]) * 0.999
             action = actions[idx] * (-1 if negate else 1)
-            action_req = build_action_request(action, self.duration)
+            action_msg = build_action_msg(action, self.duration)
 
-            self.service_proxy(action_req, f"kami{self.robot_id}")
-            rospy.sleep(self.post_action_sleep_time)
+            t = rospy.get_time()
+            self.action_publisher.publish(action_msg)
+            while t > self.action_timestamp:
+                rospy.sleep(0.001)
+            rospy.sleep(self.duration + self.post_action_sleep_time)
 
     def get_state(self):
         robot_pos = self.state_dict["robot"].copy()
@@ -309,15 +311,15 @@ class Experiment():
             import pdb;pdb.set_trace()
 
         action = np.clip(action, *self.action_range)
-        action_req = build_action_request(action, self.duration)
 
         if not self.debug:
             print("SENDING ACTION")
-            self.service_proxy(action_req, f"kami{self.robot_id}")
-            rospy.sleep(self.post_action_sleep_time)
-            while np.linalg.norm(self.robot_vel[:2] > self.max_vel_magnitude) or \
-                np.linalg.norm(self.object_vel[:2] > self.max_vel_magnitude):
-                rospy.sleep(0.05)
+            action_msg = build_action_msg(action, self.duration)
+            t = rospy.get_time()
+            self.action_publisher.publish(action_msg)
+            while t > self.action_timestamp:
+                rospy.sleep(0.001)
+            rospy.sleep(self.duration + self.post_action_sleep_time)
 
         print(f"\n\n\n\nNO. {self.total_steps}")
         print("/////////////////////////////////////////////////")
@@ -485,9 +487,13 @@ class Experiment():
 
             # alternate between forward and backward steps
             action = np.array([1, 1]) * 0.7 * (-1 if i % 2 == 0 else 1)
-            action_req = build_action_request(action, self.duration)
-            self.service_proxy(action_req, f"kami{self.robot_id}")
-            rospy.sleep(self.post_action_sleep_time)
+            action_msg = build_action_msg(action, self.duration)
+
+            t = rospy.get_time()
+            self.action_publisher.publish(action_msg)
+            while t > self.action_timestamp:
+                rospy.sleep(0.001)
+            rospy.sleep(self.duration + self.post_action_sleep_time)
 
             next_state = self.get_state()
             norms.append(np.linalg.norm((next_state - state)[:2]))
@@ -521,6 +527,9 @@ class Experiment():
 def main(args):
     rospy.init_node("laptop_client_mpc")
 
+    """
+    get states from state publisher
+    """
     pos_dim = 3
     vel_dim = 3
     robot_pos = np.empty(pos_dim)
@@ -543,7 +552,24 @@ def main(args):
     rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
     print("subscribed to /processed_state")
 
-    experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, **vars(args))
+
+    """
+    get action timestamps from kamigami
+    """
+    action_timestamp = np.empty(1)
+
+    def update_timestamp(msg):
+        action_timestamp[:] = msg.data.to_sec()
+
+    print("waiting for /action_timestamps topic from kamigami")
+    rospy.Subscriber("/action_timestamps", Time, update_timestamp, queue_size=1)
+    print("subscribed to /action_timestamps")
+
+
+    """
+    run experiment
+    """
+    experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, **vars(args))
     experiment.run()
 
 

@@ -178,13 +178,13 @@ class DynamicsNetwork(nn.Module):
         input_state = self.dtu.state_to_model_input(state)
 
         if input_state is None:
-            input = action
+            inp = action
         else:
-            input = torch.cat([input_state, action], axis=1)
+            inp = torch.cat([input_state, action], axis=1)
         state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
-        self.input_mean = input.mean(dim=0)
-        self.input_std = input.std(dim=0)
+        self.input_mean = inp.mean(dim=0)
+        self.input_std = inp.std(dim=0)
 
         self.output_mean = state_delta.mean(dim=0)
         self.output_std = state_delta.std(dim=0)

@@ -59,6 +59,8 @@ class MPCAgent:
         state_sequence = np.empty((len(self.models), n_samples, horizon, self.state_dim))
 
         for i, model in enumerate(self.models):
+            model.eval()
+
             for t in range(horizon):
                 action = action_sequence[:, t]
                 with torch.no_grad():

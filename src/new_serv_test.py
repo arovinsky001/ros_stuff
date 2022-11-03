@@ -1,11 +1,10 @@
 #!/usr/bin/python3
 
-from ros_stuff.msg import RobotCmd
 import rospy
-from ros_stuff.srv import CommandAction, CommandActionResponse  # Service type
+from ros_stuff.msg import RobotCmd
+
+from std_msgs.msg import Time
 import sys
-from std_msgs.msg import String
-import math
 
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 
@@ -18,12 +17,14 @@ MOTOR_LEFT_PWM = 13 # PWMA - 33, GPIO 13
 MOTOR_LEFT_FW = 22 # AIN2 - 15, GPIO 22
 MOTOR_LEFT_BW = 27 # AIN1 - 13, GPIO 27
 
-def kami_callback(request):
-    print("Hi, I got a message")
-    print(request)
-    left_forward = request.robot_cmd.left_pwm > 0
-    right_forward = request.robot_cmd.right_pwm > 0
-    
+def kami_callback(msg):
+    print("Hi, I got a message:", msg)
+
+    left_pwm, right_pwm, duration = msg.left_pwm, msg.right_pwm, msg.duration
+
+    left_forward = left_pwm > 0
+    right_forward = right_pwm > 0
+
     if left_forward:
         motor_left_forward.on()
         motor_left_backward.off()
@@ -39,68 +40,17 @@ def kami_callback(request):
         motor_right_forward.off()
         motor_right_backward.on()
     motor_right_pwm.on()
-    
-    # Getting requested pwm values
-    c, name = request.robot_cmd, request.name
-    left_val, right_val, duration = c.left_pwm, c.right_pwm, c.duration
 
-    ramp_duration = duration * 0.1
-    duration -= ramp_duration * 2
-    t = rospy.get_rostime().to_sec()
-    ramp_steps = 10
-    left_pwm, right_pwm = 0., 0.
-    r = rospy.Rate(ramp_steps / ramp_duration)
+    # take action
+    off_time = 0.2
+    motor_left_pwm.blink(on_time=duration, off_time=off_time, fade_in_time=0, fade_out_time=0, n=1, background=True)
+    motor_right_pwm.blink(on_time=duration, off_time=off_time, fade_in_time=0, fade_out_time=0, n=1, background=True)
 
-    while rospy.get_rostime().to_sec() < t + ramp_duration:
-        motor_left_pwm.value = abs(left_pwm)
-        motor_right_pwm.value = abs(right_pwm)
-        left_pwm += left_val / ramp_steps
-        right_pwm += right_val / ramp_steps
-        r.sleep()
-    
-    left_pwm, right_pwm = left_val, right_val
-    motor_left_pwm.value = abs(left_pwm)
-    motor_right_pwm.value = abs(right_pwm)
+    time_msg = Time()
+    time_msg.data = rospy.get_rostime()
+    print(f"{rospy.get_name()}  ||  L: {left_pwm}  ||  R: {right_pwm} || T: {duration}")
 
-    action_time = rospy.get_rostime().to_sec()
-    print(f"{rospy.get_name()}  ||  L: {left_val}  ||  R: {right_val} || T: {duration}")
-    
-    rospy.sleep(duration)
-
-    t = rospy.get_rostime().to_sec()
-    r = rospy.Rate(ramp_steps / ramp_duration)
-
-    while rospy.get_rostime().to_sec() < t + ramp_duration:
-        left_pwm -= left_val / ramp_steps
-        right_pwm -= right_val / ramp_steps
-        motor_left_pwm.value = abs(left_pwm)
-        motor_right_pwm.value = abs(right_pwm)
-        r.sleep()
-
-    motor_left_pwm.value = 0.0
-    motor_right_pwm.value = 0.0
-
-    return CommandActionResponse(name, action_time)
-
-def robot_server(name):
-    # # Create class instance for specific kamigami
-    # specific_class = '{}_class'.format(name)
-    # specific = KamigamiNode(name)
-
-    # Initialize the server node for specific kamigami
-    print("started")
-    rospy.init_node('{}_robot_server'.format(name))
-    print("made node")
-    # Register service
-    rospy.Service(
-        '/{}/server'.format(name),  # Service name
-        CommandAction,  # Service type
-        kami_callback  # Service callback
-    )
-    print("registered service")
-    rospy.loginfo('Running robot server...')
-    rospy.spin() # Spin the node until Ctrl-C
-
+    publisher.publish(time_msg)
 
 if __name__ == '__main__':
     motor_standby = DigitalOutputDevice(MOTOR_STANDBY)
@@ -113,5 +63,14 @@ if __name__ == '__main__':
     ports = [motor_standby, motor_left_pwm, motor_left_forward, motor_left_backward,
         motor_right_pwm, motor_right_forward, motor_right_backward]
     motor_standby.on()
-    
-    robot_server(sys.argv[1])
+
+    rospy.init_node(f'robot_{sys.argv[1]}')
+
+    print("waiting for /action_topic rostopic")
+    rospy.Subscriber("/action_topic", RobotCmd, kami_callback, queue_size=1)
+    print("subscribed to /action_topic")
+
+    publisher = rospy.Publisher("/action_timestamps", Time, queue_size=1)
+
+    print("rospy spinning")
+    rospy.spin()
