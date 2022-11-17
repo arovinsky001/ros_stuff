@@ -114,11 +114,11 @@ class DynamicsNetwork(nn.Module):
         state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
         # chunk into "tasks" i.e. batches continuous in time
-        tasks = 40
-        task_steps = 30
-        meta_update_steps = 3
+        tasks = 10
+        task_steps = 20
+        meta_update_steps = 2
 
-        first_idxs = torch.randint(len(state) - 2 * task_steps + 1, (tasks,))
+        first_idxs = torch.randint(len(state) - 2 * task_steps + 1, size=(tasks,))
         tiled_first_idxs = first_idxs.reshape(-1, 1).repeat(1, task_steps)
         all_idxs = tiled_first_idxs + torch.arange(task_steps)
 
@@ -163,6 +163,7 @@ class DynamicsNetwork(nn.Module):
 
         # update network
         self.optimizer.zero_grad()
+        # loss.backward()
         loss.backward(retain_graph=True)
         self.optimizer.step()
 

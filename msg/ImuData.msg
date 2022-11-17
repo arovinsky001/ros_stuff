@@ -1,12 +1,7 @@
+Header header
 float32 a_x
 float32 a_y
-float32 a_z
-float32 g_x
-float32 g_y
-float32 g_z
 float32 m_x
 float32 m_y
-float32 m_z
-float32 k_x
-float32 k_y
-float32 k_z
+int32 action_num
+int8 robot_id

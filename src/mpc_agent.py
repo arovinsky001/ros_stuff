@@ -69,9 +69,9 @@ class MPCAgent:
                     else:
                         state_sequence[i, :, t] = model(state_sequence[i, :, t-1], action, sample=False, delta=False)
 
-        if n_samples > 1:
-            if np.linalg.norm(state_sequence[0, 0] - state_sequence[0, 1]) == 0:
-                import pdb;pdb.set_trace()
+        # if n_samples > 1:
+        #     if np.linalg.norm(state_sequence[0, 0] - state_sequence[0, 1]) == 0:
+        #         import pdb;pdb.set_trace()
 
         return state_sequence
 

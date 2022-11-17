@@ -18,9 +18,10 @@ from std_msgs.msg import Time
 import tf2_ros
 
 # seed for reproducibility
-SEED = 0
-import torch; torch.manual_seed(SEED)
-np.random.seed(SEED)
+# SEED = 0
+# import torch; torch.manual_seed(SEED)
+# np.random.seed(SEED)
+SEED = np.random.randint(0, 1e9)
 
 
 class Experiment():
@@ -52,10 +53,11 @@ class Experiment():
             "corner": corner_pos,
         }
         self.action_timestamp = action_timestamp
+        self.last_action_timestamp = self.action_timestamp.copy()
 
         # online data collection/learning params
         self.random_steps = 0 if pretrain or load_agent else random_steps
-        self.gradient_steps = 1
+        self.gradient_steps = 2
         self.online = online
         self.save_freq = save_freq
         self.pretrain_samples = pretrain_samples
@@ -63,10 +65,11 @@ class Experiment():
         # system params
         self.debug = debug
         self.use_object = (self.object_id >= 0)
-        self.duration = 0.4 if self.use_object else 0.2
+        # self.duration = 0.4 if self.use_object else 0.2
+        self.duration = 0.4
         self.action_range = np.array([[-1, -1], [1, 1]]) * 0.999
         self.rand_ac_mean = rand_ac_mean
-        self.post_action_sleep_time = 0.2
+        self.post_action_sleep_time = 0.7
         self.max_vel_magnitude = 0.1
 
         # train params
@@ -163,7 +166,7 @@ class Experiment():
 
             self.agent.policy.update_params_and_weights(mpc_params, cost_weights_dict)
         else:
-            self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=False, scale=self.scale,
+            self.agent = MPCAgent(seed=SEED, mpc_method=mpc_method, dist=True, scale=self.scale,
                                   hidden_dim=200, hidden_depth=1, lr=0.001, std=0.1,
                                   ensemble=ensemble, use_object=self.use_object,
                                   action_range=self.action_range, mpc_params=mpc_params,
@@ -208,13 +211,14 @@ class Experiment():
                     next_state = self.get_state()
                     self.collect_training_data(state, action, next_state)
 
-                self.print_prediction_errors(next_state)
-
-            if self.online:
-                self.update_model_online()
+                if self.started:
+                    self.print_prediction_errors(state, next_state)
 
             if self.started:
                 self.all_actions.append(action.tolist())
+
+            if self.online:
+                self.update_model_online()
 
     def step(self):
         if not self.pretrain and not self.load_agent and self.replay_buffer.size == self.random_steps:
@@ -233,19 +237,33 @@ class Experiment():
         self.total_steps += 1
         return state, action
 
-    def print_prediction_errors(self, next_state):
+    def print_prediction_errors(self, state, next_state):
+        distance_travelled = np.linalg.norm((next_state - state)[:2])
+        heading_travelled = signed_angle_difference(next_state[2], state[2])
+        distance_error = np.linalg.norm((next_state - self.predicted_next_state)[:2])
+        heading_error = signed_angle_difference(next_state[2], self.predicted_next_state[2])
         robot_prediction_error = np.array([
-            np.linalg.norm((next_state - self.predicted_next_state)[:2]),
-            signed_angle_difference(next_state[2], self.predicted_next_state[2]),
+            distance_error,
+            distance_error / (distance_travelled + 1e-8),
+            heading_error,
+            np.abs(heading_error / (heading_travelled + 1e-8)),
         ])
-        print("\nROBOT PREDICTION ERROR (distance, heading):", robot_prediction_error)
+        print("\nROBOT PREDICTION ERROR (distance, distance normalized, heading, heading_normalized):", robot_prediction_error)
+        self.logger.log_model_errors(robot_prediction_error, object=False)
 
         if self.use_object:
+            distance_travelled = np.linalg.norm((next_state - state)[3:5])
+            heading_travelled = signed_angle_difference(next_state[5], state[5])
+            distance_error = np.linalg.norm((next_state - self.predicted_next_state)[3:5])
+            heading_error = signed_angle_difference(next_state[5], self.predicted_next_state[5])
             object_prediction_error = np.array([
-                np.linalg.norm((next_state - self.predicted_next_state)[3:5]),
-                signed_angle_difference(next_state[5], self.predicted_next_state[5]),
+                distance_error,
+                distance_error / distance_travelled,
+                heading_error,
+                np.abs(heading_error / heading_travelled),
             ])
-            print("OBJECT PREDICTION ERROR (distance, heading):", object_prediction_error, "\n")
+            print("OBJECT PREDICTION ERROR (distance, distance normalized, heading):", object_prediction_error, "\n")
+            self.logger.log_model_errors(object_prediction_error, object=True)
 
     def take_warmup_steps(self):
         if self.debug:
@@ -256,12 +274,14 @@ class Experiment():
             negate = np.random.randint(0, 2)
             actions = np.array([[1, 1], [1, -1]]) * 0.999
             action = actions[idx] * (-1 if negate else 1)
-            action_msg = build_action_msg(action, self.duration)
+            action_msg = build_action_msg(action, self.duration, -1)
 
-            t = rospy.get_time()
             self.action_publisher.publish(action_msg)
-            while t > self.action_timestamp:
-                rospy.sleep(0.001)
+            rospy.sleep(0.01)
+
+            while self.last_action_timestamp == self.action_timestamp:
+                rospy.wait_for_message("/action_timestamps", Time, timeout=1)
+            self.last_action_timestamp = self.action_timestamp.copy()
             rospy.sleep(self.duration + self.post_action_sleep_time)
 
     def get_state(self):
@@ -300,9 +320,10 @@ class Experiment():
             #     locs *= -1
             # scale = 0.7 if self.rand_ac_mean == 0 else 0.3
             # # action = np.random.normal(loc=locs[idx], scale=scale, size=dimensions["action_dim"])
+
             action = np.random.uniform(-1.1, 1.1, size=dimensions["action_dim"]).squeeze()
 
-            # rng = np.linspace(-1, 1, 3)
+            # rng = np.linspace(-1, 1, np.floor(np.sqrt(self.random_steps)))
             # left, right = np.meshgrid(rng, rng)
             # actions = np.stack((left, right)).transpose(2, 1, 0).reshape(-1, 2)
             # action = actions[self.replay_buffer.size]
@@ -314,11 +335,41 @@ class Experiment():
 
         if not self.debug:
             print("SENDING ACTION")
-            action_msg = build_action_msg(action, self.duration)
-            t = rospy.get_time()
+
+            # if self.online:
+            #     self.scaler = 1.0
+            # elif self.total_steps % 50 == 0:
+            #     # scaler = np.random.rand() * 5
+            #     lst_left = [0.7, 0.9, 2.4, 4.1]
+            #     lst_right = [1.4, 2.8, 1.8, 0.8]
+            #     self.scaler = np.array([lst_left[self.total_steps // 50], lst_right[self.total_steps // 50]])
+
+            # ac = np.clip(action * self.scaler, *self.action_range)
+            # print("SCALER:", self.scaler)
+
+            ac = action
+
+            # if self.online:
+            #     self.cent = 0.5
+            #     self.shift = 0.7
+            # elif self.total_steps % 20 == 0:
+            #     self.cent = np.random.uniform()
+            #     self.shift = np.random.uniform()
+
+            # print(f"CENT: {self.cent}, SHIFT: {self.shift}")
+
+            # if self.shift < 0.5:
+            #     ac = np.clip(np.power((action + self.cent), 3), *self.action_range)
+            # else:
+            #     ac = np.clip(np.power((action - self.cent), 3), *self.action_range)
+
+            action_msg = build_action_msg(ac, self.duration, self.total_steps)
             self.action_publisher.publish(action_msg)
-            while t > self.action_timestamp:
-                rospy.sleep(0.001)
+            rospy.sleep(0.01)
+
+            while self.last_action_timestamp == self.action_timestamp:
+                rospy.wait_for_message("/action_timestamps", Time, timeout=1)
+            self.last_action_timestamp = self.action_timestamp.copy()
             rospy.sleep(self.duration + self.post_action_sleep_time)
 
         print(f"\n\n\n\nNO. {self.total_steps}")
@@ -446,6 +497,10 @@ class Experiment():
             self.logger.plot_states(save=True, laps=self.laps, replay_buffer=self.replay_buffer,
                                     start_state=start_state, reverse_lap=self.reverse_lap)
             self.logger.reset_plot_states()
+
+            self.logger.plot_model_errors()
+            self.logger.reset_model_errors()
+
             self.logger.log_performance_metrics(self.costs, self.all_actions)
 
             if self.online:
@@ -468,13 +523,19 @@ class Experiment():
             self.logger.dump_buffer(self.replay_buffer)
 
     def update_model_online(self):
-        if self.replay_buffer.size >= self.random_steps:
+        if self.replay_buffer.size > self.random_steps:
             for model in self.agent.models:
                 for _ in range(self.gradient_steps):
-                    if self.meta:
-                        states, actions, next_states = self.replay_buffer.sample_recent(30)
-                    else:
-                        states, actions, next_states = self.replay_buffer.sample(self.batch_size)
+                    # if self.meta:
+                    #     states, actions, next_states = self.replay_buffer.sample_recent(30)
+                    # else:
+
+                    states, actions, next_states = self.replay_buffer.sample(self.batch_size)
+
+                    # sample_size = min(self.total_steps, 10)
+                    # states, actions, next_states = self.replay_buffer.sample_recent(sample_size)
+                    # print(len(states), len(actions), len(next_states))
+
                     model.update(states, actions, next_states)
 
     def warmup_test(self):
@@ -487,12 +548,14 @@ class Experiment():
 
             # alternate between forward and backward steps
             action = np.array([1, 1]) * 0.7 * (-1 if i % 2 == 0 else 1)
-            action_msg = build_action_msg(action, self.duration)
+            action_msg = build_action_msg(action, self.duration, -1)
 
-            t = rospy.get_time()
             self.action_publisher.publish(action_msg)
-            while t > self.action_timestamp:
-                rospy.sleep(0.001)
+            rospy.sleep(0.01)
+
+            while self.last_action_timestamp == self.action_timestamp:
+                rospy.wait_for_message("/action_timestamps", Time, timeout=1)
+            self.last_action_timestamp = self.action_timestamp.copy()
             rospy.sleep(self.duration + self.post_action_sleep_time)
 
             next_state = self.get_state()
@@ -556,7 +619,7 @@ def main(args):
     """
     get action timestamps from kamigami
     """
-    action_timestamp = np.empty(1)
+    action_timestamp = np.zeros(1)
 
     def update_timestamp(msg):
         action_timestamp[:] = msg.data.to_sec()
