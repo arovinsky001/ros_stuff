@@ -32,7 +32,7 @@ class MPCPolicy:
         # discount costs through time
         # discount = (1 - 1 / (4 * horizon)) ** np.arange(horizon)
 
-        discount = 0.95 ** np.arange(horizon)
+        discount = 0.75 ** np.arange(horizon)
         ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
@@ -156,3 +156,9 @@ class MPPIPolicy(MPCPolicy):
         #     import pdb;pdb.set_trace()
 
         return best_action, predicted_next_state
+
+
+class SensoryPolicy(MPPIPolicy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    # TODO : build upon MPPI to integrate IMU learning

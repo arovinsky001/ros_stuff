@@ -17,7 +17,7 @@ AGENT_PATH = "/home/bvanbuskirk/Desktop/experiments/agent.pkl"
 
 def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain=False, consecutive=False, pretrain_samples=500,
                      save_agent=False, train_epochs=100, use_all_data=False, batch_size=500, meta=False):
-    if pretrain:
+    if pretrain or consecutive:
         n_samples = min(pretrain_samples, replay_buffer.size)
 
         if consecutive:

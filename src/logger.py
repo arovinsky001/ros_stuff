@@ -6,6 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle as pkl
 import csv
+import wandb
+from datetime import datetime
 
 
 class Logger:
@@ -16,6 +18,9 @@ class Logger:
                 exp_name += f"_pretrain{experiment.pretrain_samples}"
             if experiment.online:
                 exp_name += "_online"
+
+        date = datetime.now().strftime("%m%d%Y")
+        wandb.init(project=date, entity="kamigami", id=exp_name)
 
         self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if experiment.use_object else 'robot'}/{exp_name}/"
         self.buffer_path = "/home/bvanbuskirk/Desktop/experiments/buffers/"

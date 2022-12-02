@@ -6,6 +6,7 @@ import pickle as pkl
 import numpy as np
 import rospy
 from tqdm import trange
+import wandb
 
 from mpc_agent import MPCAgent
 from replay_buffer import ReplayBuffer
@@ -69,7 +70,8 @@ class Experiment():
         self.duration = 0.4
         self.action_range = np.array([[-1, -1], [1, 1]]) * 0.999
         self.rand_ac_mean = rand_ac_mean
-        self.post_action_sleep_time = 0.7
+        # self.post_action_sleep_time = 0.7
+        self.post_action_sleep_time = 0.5
         self.max_vel_magnitude = 0.1
 
         # train params
@@ -117,12 +119,13 @@ class Experiment():
         if not self.debug:
             self.action_publisher = rospy.Publisher("/action_topic", RobotCmd, queue_size=1)
 
-        self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
-        if not os.path.exists(self.yaw_offset_path) or calibrate:
-            self.yaw_offsets = np.zeros(10)
-            self.calibrate()
+        # self.yaw_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/yaw_offsets.npy"
+        # if not os.path.exists(self.yaw_offset_path) or calibrate:
+        #     self.yaw_offsets = np.zeros(10)
+        #     self.calibrate()
 
-        self.yaw_offsets = np.load(self.yaw_offset_path)
+        # self.yaw_offsets = np.load(self.yaw_offset_path)
+        self.yaw_offsets = np.zeros(10)
 
         self.define_goal_trajectory()
 
@@ -144,7 +147,7 @@ class Experiment():
         }
         if mpc_method == 'mppi':
             mpc_params.update({
-                "beta": 0.5,
+                "beta": 0.8,
                 "gamma": mpc_gamma,
                 "noise_std": 2.,
             })
@@ -321,7 +324,8 @@ class Experiment():
             # scale = 0.7 if self.rand_ac_mean == 0 else 0.3
             # # action = np.random.normal(loc=locs[idx], scale=scale, size=dimensions["action_dim"])
 
-            action = np.random.uniform(-1.1, 1.1, size=dimensions["action_dim"]).squeeze()
+            # action = np.random.uniform(-1.1, 1.1, size=dimensions["action_dim"]).squeeze()
+            action = np.random.beta(0.6, 0.6, size=2)
 
             # rng = np.linspace(-1, 1, np.floor(np.sqrt(self.random_steps)))
             # left, right = np.meshgrid(rng, rng)
@@ -368,7 +372,7 @@ class Experiment():
             rospy.sleep(0.01)
 
             while self.last_action_timestamp == self.action_timestamp:
-                rospy.wait_for_message("/action_timestamps", Time, timeout=1)
+                rospy.wait_for_message("/action_timestamps", Time, timeout=4)
             self.last_action_timestamp = self.action_timestamp.copy()
             rospy.sleep(self.duration + self.post_action_sleep_time)
 
@@ -443,6 +447,7 @@ class Experiment():
         if self.started:
             costs_to_record = np.array([[cost_dict["distance"], cost_dict["heading"], total_cost]])
             self.costs = np.append(self.costs, costs_to_record, axis=0)
+            wandb.log(cost_dict, step=self.lap_step)
 
         return cost_dict, total_cost
 
