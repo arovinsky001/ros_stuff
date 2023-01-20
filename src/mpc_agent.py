@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+import hydra
 
 from dynamics_network import DynamicsNetwork
 from mpc_policies import MPPIPolicy, CEMPolicy, RandomShootingPolicy
@@ -9,9 +10,7 @@ from utils import DataUtils, signed_angle_difference, dimensions
 
 
 class MPCAgent:
-    def __init__(self, seed=1, mpc_method='mppi', hidden_dim=200, hidden_depth=2, lr=0.001,
-                 std=0.01, dist=True, scale=True, ensemble=1, use_object=False,
-                 action_range=None, mpc_params=None, cost_weights_dict=None, device=torch.device("cpu")):
+    def __init__(self, hidden_dim, hidden_depth, lr, std, dist, scale, ensemble, use_object, mpc_config):
         assert ensemble > 0
 
         input_dim = dimensions["action_dim"]
@@ -30,21 +29,15 @@ class MPCAgent:
         for model in self.models:
             model.to(device)
 
-        if mpc_method == 'mppi':
-            policy = MPPIPolicy
-        elif mpc_method == 'cem':
-            policy = CEMPolicy
-        elif mpc_method == 'shooting':
-            policy = RandomShootingPolicy
-        else:
-            raise NotImplementedError
-        self.policy = policy(action_range=action_range, simulate_fn=self.simulate, cost_fn=self.compute_costs,
+        self.policy = hydra.utils.instantiate(mpc_config)
+
+        self.policy(simulate_fn=self.simulate, cost_fn=self.compute_costs,
                              params=mpc_params, cost_weights_dict=cost_weights_dict)
 
-        self.seed = seed
         self.scale = scale
         self.ensemble = ensemble
         self.use_object = use_object
+        self.trained = False
 
     @property
     def model(self):
@@ -69,68 +62,4 @@ class MPCAgent:
                     else:
                         state_sequence[i, :, t] = model(state_sequence[i, :, t-1], action, sample=False, delta=False)
 
-        # if n_samples > 1:
-        #     if np.linalg.norm(state_sequence[0, 0] - state_sequence[0, 1]) == 0:
-        #         import pdb;pdb.set_trace()
-
         return state_sequence
-
-    def compute_costs(self, state, action, goals, robot_goals=False, signed=False):
-        state_dim = dimensions["state_dim"]
-        if self.use_object:
-            robot_state = state[:, :, :, :state_dim]
-            object_state = state[:, :, :, state_dim:2*state_dim]
-
-            effective_state = robot_state if robot_goals else object_state
-        else:
-            effective_state = state[:, :, :, :state_dim]
-
-        # distance to goal position
-        state_to_goal_xy = (goals - effective_state)[:, :, :, :-1]
-        dist_cost = np.linalg.norm(state_to_goal_xy, axis=-1)
-        if signed:
-            dist_cost *= forward
-
-        # difference between current and goal heading
-        current_angle = effective_state[:, :, :, 2]
-        target_angle = np.arctan2(state_to_goal_xy[:, :, :, 1], state_to_goal_xy[:, :, :, 0])
-        heading_cost = signed_angle_difference(target_angle, current_angle)
-
-        left = (heading_cost > 0) * 2 - 1
-        forward = (np.abs(heading_cost) < np.pi / 2) * 2 - 1
-
-        heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
-        heading_cost = np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
-
-        if signed:
-            heading_cost *= left * forward
-        else:
-            heading_cost = np.abs(heading_cost)
-
-        # object-robot separation
-        if self.use_object:
-            object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
-            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
-        else:
-            sep_cost = np.array([0.])
-
-        # object-robot heading difference
-        if self.use_object:
-            robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
-            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
-            heading_diff_cost = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
-        else:
-            heading_diff_cost = np.array([0.])
-
-        # action magnitude
-        norm_cost = -np.linalg.norm(action, axis=-1)
-
-        cost_dict = {
-            "distance": dist_cost,
-            "heading": heading_cost,
-            "action_norm": norm_cost,
-            "separation": sep_cost,
-            "heading_difference": heading_diff_cost,
-        }
-
-        return cost_dict

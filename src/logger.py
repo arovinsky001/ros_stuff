@@ -6,18 +6,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle as pkl
 import csv
+from collections import OrderedDict
+import wandb
+from utils import signed_angle_difference, dimensions
 
 
 class Logger:
-    def __init__(self, experiment, plot, corner, exp_name=None, **kwargs):
+    def __init__(self, params):
+        self.params = params
+
         if exp_name is None:
-            exp_name = f"{'robot' if experiment.robot_goals else 'object'}goals"
-            if experiment.pretrain or experiment.load_agent:
-                exp_name += f"_pretrain{experiment.pretrain_samples}"
-            if experiment.online:
+            exp_name = f"{'robot' if self.robot_goals else 'object'}goals"
+            if self.pretrain or self.load_agent:
+                exp_name += f"_pretrain{self.pretrain_samples}"
+            if self.online:
                 exp_name += "_online"
 
-        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if experiment.use_object else 'robot'}/{exp_name}/"
+        exp_name = f"{'object' if self.use_object else 'robot'}_{exp_name}"
+
+        wandb.init(project=exp_name, entity="kamigami")
+
+        self.exp_path = f"/home/bvanbuskirk/Desktop/experiments/{'object' if self.use_object else 'robot'}/{exp_name}/"
         self.buffer_path = "/home/bvanbuskirk/Desktop/experiments/buffers/"
         self.plot_path = self.exp_path + "plots/"
         self.state_path = self.exp_path + "states/"
@@ -34,11 +43,121 @@ class Logger:
         self.robot_model_errors = []
         self.object_model_errors = []
 
-        self.use_object = experiment.use_object
-        self.plot = plot
-        self.corner = corner
         self.logged_costs = self.logged_actions = False
         self.object_or_robot = 'object' if self.use_object else 'robot'
+
+        self.episode_step = 0
+        self.costs_dict = {}
+
+    def __getattr__(self, key):
+        return self.params[key]
+
+    def log_step(self, state, action, goal, reset=False):
+        self.states.append(state)
+        self.actions.append(action)
+        self.goals.append(goal)
+
+        if reset:
+            self.episode_step = 0
+        else:
+            self.episode_step += 1
+
+    def log_prediction_errors(self, state, next_state, predicted_next_state, step):
+        k = 2 if self.use_object else 1
+
+        for i in range(k):
+            start, end = i * dimensions["state_dim"], (i+1) * dimensions["state_dim"]
+            x_state, x_next_state, x_pred_next_state = state[start:end], next_state[start:end], predicted_next_state[start:end]
+
+            distance_travelled = np.linalg.norm((x_next_state - x_state)[:2])
+            heading_travelled = signed_angle_difference(x_next_state[2], x_state[2])
+            distance_error = np.linalg.norm((x_next_state - x_pred_next_state)[:2])
+            heading_error = signed_angle_difference(x_next_state[2], x_pred_next_state[2])
+
+            prediction_error = OrderedDict()
+            robot_or_object = "robot" if i == 0 else "object"
+            prediction_error[f"{robot_or_object}_error/distance"] = distance_error
+            prediction_error[f"{robot_or_object}_error/normalized_distance"] = distance_error / (distance_travelled + 1e-8)
+            prediction_error[f"{robot_or_object}_error/heading"] = heading_error
+            prediction_error[f"{robot_or_object}_error/normalized_heading"] = np.abs(heading_error / (heading_travelled + 1e-8))
+            wandb.log(prediction_error, step=step)
+
+            print(f"\{robot_or_object} prediction errors:")
+            for error_type, error_value in prediction_error.items():
+                print(f"{error_type}: {error_value}")
+
+    def log_mpc_costs(self, state, goal, step):
+        cost_dict = self.agent.compute_costs(
+                state[None, None, None, :], np.array([[[[0., 0.]]]]), goal[None, :], robot_goals=self.robot_goals
+                )
+
+        # initialize cost dict upon first step
+        if len(self.costs_dict) == 0:
+            self.costs_dict = {key: [value] for key, value in cost_dict.items()}
+
+        total_cost = 0
+        for cost_type, cost in cost_dict.items():
+            cost_squeezed = cost.squeeze()
+            cost_dict[cost_type] = cost_squeezed
+            self.costs_dict[cost_type].append(cost_squeezed)
+            total_cost += cost_squeezed * self.agent.policy.cost_weights_dict[cost_type]
+
+        cost_dict["total"] = total_cost
+        self.costs_dict["total"].append(total_cost)
+        wandb.log(cost_dict, step=step)
+
+    def log_img_and_plot(self):
+        states = np.array(self.states)
+        actions = np.array(self.actions)
+        goals = np.array(self.goals)
+
+        fig, ax = plt.subplots()
+
+        ax.plot(goals[:, 0], goals[:, 1], color="green", linewidth=1.5, marker="*", label="Goal Trajectory")
+        ax.plot(states[:, 0], states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
+
+        if self.use_object:
+            ax.plot(states[:, 3], states[:, 4], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
+
+        ax.axis('equal')
+        ax.set_xlim((self.corner[0], 0))
+        ax.set_ylim((self.corner[1], 0))
+        ax.legend()
+        fig.show()
+
+
+
+        if self.episode_step > 0:
+            ...
+
+        plt.plot(plot_robot_states[:, 0], plot_robot_states[:, 1], color="red", linewidth=1.5, marker=">", label="Robot Trajectory")
+
+        if self.use_object:
+            plt.plot(plot_object_states[:, 0], plot_object_states[:, 1], color="blue", linewidth=1.5, marker=".", label="Object Trajectory")
+
+        if len(self.goal_states) == 1 or not self.plot:
+            ax = plt.gca()
+            ax.axis('equal')
+            plt.xlim((self.corner[0], 0))
+            plt.ylim((self.corner[1], 0))
+            plt.legend()
+            plt.ion()
+            plt.show()
+
+        if save:
+            plt.plot(start_state[0], start_state[1], color="orange", marker="D", label="Starting Point", markersize=6)
+            plt.title(f"{'Reversed' if reverse_lap else 'Standard'} Trajectory")
+            plt.xlabel("X Position")
+            plt.ylabel("Y Position")
+            plt.legend()
+            plt.draw()
+            plt.pause(1.)
+
+            plt.savefig(self.plot_path + f"lap{laps}_rb{replay_buffer.size}.png")
+
+
+
+
 
     def log_performance_metrics(self, costs, actions):
         dist_costs, heading_costs, total_costs = costs.T
@@ -68,19 +187,6 @@ class Logger:
 
         with open(self.exp_path + "costs.npy", "wb") as f:
             np.save(f, costs_np)
-
-    def log_actions(self, actions):
-        if not self.logged_actions:
-            write_option = "w"
-            self.logged_actions = True
-        else:
-            write_option = "a"
-
-        with open(self.exp_path + "actions.csv", write_option, newline="") as csvfile:
-            fwriter = csv.writer(csvfile, delimiter=',')
-            for action in actions:
-                fwriter.writerow(action)
-            fwriter.writerow([])
 
     def reset_plot_states(self):
         self.robot_states = []

@@ -1,25 +1,124 @@
 #!/usr/bin/python
 
 import numpy as np
-from utils import dimensions
+import torch
+
+from dynamics_network import DynamicsNetwork
+from utils import DataUtils, signed_angle_difference, dimensions
+
+device = "cpu"
 
 
 class MPCPolicy:
-    def __init__(self, action_range=None, simulate_fn=None, cost_fn=None, params=None, cost_weights_dict=None):
+    def __init__(self, hidden_dim, hidden_depth, lr, std, dist, scale, ensemble, use_object, params, cost_weights_dict):
         self.action_dim = dimensions["action_dim"]
-        self.simulate = simulate_fn
-        self.compute_costs = cost_fn
         self.params = params
         self.cost_weights_dict = cost_weights_dict
 
-        if action_range is None:
-            self.action_range = np.array([[-1, -1], [1, 1]]) * 0.999
-        else:
-            self.action_range = action_range
+        assert ensemble > 0
+
+        input_dim = dimensions["action_dim"]
+        output_dim = dimensions["robot_output_dim"]
+        self.state_dim = dimensions["state_dim"]
+
+        if use_object:
+            input_dim += dimensions["object_input_dim"]
+            output_dim += dimensions["object_output_dim"]
+            self.state_dim += dimensions["state_dim"]
+
+        self.dtu = DataUtils(use_object=use_object)
+        self.models = [DynamicsNetwork(input_dim, output_dim, self.dtu, hidden_dim=hidden_dim, hidden_depth=hidden_depth,
+                                       lr=lr, std=std, dist=dist, use_object=use_object, scale=scale)
+                        for _ in range(ensemble)]
+        for model in self.models:
+            model.to(device)
+
+        self.scale = scale
+        self.ensemble = ensemble
+        self.use_object = use_object
+        self.trained = False
 
     def update_params_and_weights(self, params, cost_weights_dict):
         self.params = params
         self.cost_weights_dict = cost_weights_dict
+
+    def simulate(self, initial_state, action_sequence):
+        n_samples, horizon, _ = action_sequence.shape
+        initial_state = np.tile(initial_state, (n_samples, 1))
+        pred_state_sequence = np.empty((len(self.models), n_samples, horizon, self.state_dim))
+
+        for i, model in enumerate(self.models):
+            model.eval()
+
+            for t in range(horizon):
+                action = action_sequence[:, t]
+                with torch.no_grad():
+                    if t == 0:
+                        pred_state_sequence[i, :, t] = model(initial_state, action, sample=False, delta=False)
+                    else:
+                        pred_state_sequence[i, :, t] = model(pred_state_sequence[i, :, t-1], action, sample=False, delta=False)
+
+        return pred_state_sequence
+
+    def compute_costs(self, state, action, goals, robot_goals=False, signed=False):
+        state_dim = dimensions["state_dim"]
+        if self.use_object:
+            robot_state = state[:, :, :, :state_dim]
+            object_state = state[:, :, :, state_dim:2*state_dim]
+
+            effective_state = robot_state if robot_goals else object_state
+        else:
+            effective_state = state[:, :, :, :state_dim]
+
+        # distance to goal position
+        state_to_goal_xy = (goals - effective_state)[:, :, :, :-1]
+        dist_cost = np.linalg.norm(state_to_goal_xy, axis=-1)
+        if signed:
+            dist_cost *= forward
+
+        # difference between current and goal heading
+        current_angle = effective_state[:, :, :, 2]
+        target_angle = np.arctan2(state_to_goal_xy[:, :, :, 1], state_to_goal_xy[:, :, :, 0])
+        heading_cost = signed_angle_difference(target_angle, current_angle)
+
+        left = (heading_cost > 0) * 2 - 1
+        forward = (np.abs(heading_cost) < np.pi / 2) * 2 - 1
+
+        heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
+        heading_cost = np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
+
+        if signed:
+            heading_cost *= left * forward
+        else:
+            heading_cost = np.abs(heading_cost)
+
+        # object-robot separation distance
+        if self.use_object:
+            object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
+            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
+        else:
+            sep_cost = np.array([0.])
+
+        # object-robot heading difference
+        if self.use_object:
+            robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
+            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
+            heading_diff_cost = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
+        else:
+            heading_diff_cost = np.array([0.])
+
+        # action magnitude
+        norm_cost = -np.linalg.norm(action, axis=-1)
+
+        cost_dict = {
+            "distance": dist_cost,
+            "heading": heading_cost,
+            "separation": sep_cost,
+            "heading_difference": heading_diff_cost,
+            "action_norm": norm_cost,
+        }
+
+        return cost_dict
 
     def compute_total_costs(self, predicted_state_sequence, sampled_actions, goals, robot_goals):
         cost_dict = self.compute_costs(predicted_state_sequence, sampled_actions, goals, robot_goals=robot_goals)
@@ -55,7 +154,7 @@ class RandomShootingPolicy(MPCPolicy):
         n_samples = self.params["sample_trajectories"]
         robot_goals = self.params["robot_goals"]
 
-        sampled_actions = np.random.uniform(*self.action_range, size=(n_samples, horizon, self.action_dim))
+        sampled_actions = np.random.uniform(-1, 1, size=(n_samples, horizon, self.action_dim))
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
         total_costs = self.compute_total_costs(predicted_state_sequence, sampled_actions, goals, robot_goals)
 
@@ -81,7 +180,7 @@ class CEMPolicy(MPCPolicy):
 
         trajectory_mean = np.zeros(action_trajectory_dim)
         trajectory_std = np.zeros(action_trajectory_dim)
-        sampled_actions = np.random.uniform(*self.action_range, size=(n_samples, horizon, self.action_dim))
+        sampled_actions = np.random.uniform(-1, 1, size=(n_samples, horizon, self.action_dim))
 
         for i in range(refine_iters):
             if i > 0:
@@ -139,7 +238,7 @@ class MPPIPolicy(MPCPolicy):
                 sampled_actions[:, t] = beta * (self.trajectory_mean[t] + noise[:, t]) \
                                             + (1 - beta) * sampled_actions[:, t-1]
 
-        sampled_actions = np.clip(sampled_actions, *self.action_range)
+        sampled_actions = np.clip(sampled_actions, -1, 1)
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
         total_costs = self.compute_total_costs(predicted_state_sequence, sampled_actions, goals, robot_goals)
 
