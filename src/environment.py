@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import os
 import numpy as np
@@ -9,9 +9,7 @@ import rospy
 from std_msgs.msg import Time
 from ros_stuff.msg import RobotCmd
 
-from utils import build_action_msg
-from calibrate import YAW_OFFSET_PATH
-
+from utils import build_action_msg, YAW_OFFSET_PATH
 
 # class Environment(gym.Env):
     # def __init__(self,
@@ -22,7 +20,7 @@ from calibrate import YAW_OFFSET_PATH
     # ):
 
 class Environment:
-    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, agent):
+    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, agent, calibrate=False):
         self.params = params
         self.agent = agent
 
@@ -46,25 +44,28 @@ class Environment:
         self.last_action_timestamp = self.action_timestamp.copy()
 
         self.action_publisher = rospy.Publisher("/action_topic", RobotCmd, queue_size=1)
-        self.camera_img_subscriber = rospy.Subscriber(...)
+        # self.camera_img_subscriber = rospy.Subscriber(...)
 
-        # define centers and radius for figure-8 trajectory
-        rospy.sleep(0.2)        # wait for states to be published and set
+        if not calibrate:
+            # define centers and radius for figure-8 trajectory
+            rospy.sleep(0.2)        # wait for states to be published and set
 
-        if self.robot_goals:
-            back_circle_center_rel = np.array([0.7, 0.5])
-            front_circle_center_rel = np.array([0.4, 0.5])
+            if self.robot_goals:
+                back_circle_center_rel = np.array([0.7, 0.5])
+                front_circle_center_rel = np.array([0.4, 0.5])
+            else:
+                back_circle_center_rel = np.array([0.65, 0.5])
+                front_circle_center_rel = np.array([0.4, 0.5])
+
+            corner_pos = self.state_dict["corner"].copy()
+            self.back_circle_center = back_circle_center_rel * corner_pos[:2]
+            self.front_circle_center = front_circle_center_rel * corner_pos[:2]
+            self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
+
+            assert os.path.exists(YAW_OFFSET_PATH)
+            self.yaw_offsets = np.load(YAW_OFFSET_PATH)
         else:
-            back_circle_center_rel = np.array([0.65, 0.5])
-            front_circle_center_rel = np.array([0.4, 0.5])
-
-        corner_pos = self.state_dict["corner"].copy()
-        self.back_circle_center = back_circle_center_rel * corner_pos[:2]
-        self.front_circle_center = front_circle_center_rel * corner_pos[:2]
-        self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
-
-        assert os.path.exists(YAW_OFFSET_PATH)
-        self.yaw_offsets = np.load(YAW_OFFSET_PATH)
+            self.yaw_offsets = np.zeros(10)
 
         # self.n_robots = n_robots
         # self.action_duration = action_duration

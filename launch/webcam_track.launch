@@ -3,7 +3,7 @@
 	<arg name="video_device"		default="/dev/video2" />
 	<arg name="image_width"			default="1920" />
 	<arg name="image_height"		default="1080" />
-	<arg name="framerate"		    default="60" />
+	<arg name="framerate"		    default="30" />
 
 	<node name="usb_cam" pkg="usb_cam" type="usb_cam_node">
 	    <param name="video_device" value="$(arg video_device)" />
@@ -68,8 +68,8 @@
 		<param name="corner_id"          type="int" value="$(arg corner_id)" />
 	</node>
 
-	<arg name="robots" 			default="[2]"/>
+	<!-- <arg name="robots" 			default="[2]"/>
 	<node name="process_imu_data" pkg="ros_stuff" type="process_imu_data.py" output="screen">
 		<rosparam param="robots"       subst_value="True">$(arg robots)</rosparam>
-	</node>
+	</node> -->
 </launch>

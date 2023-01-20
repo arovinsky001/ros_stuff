@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import os
 from datetime import datetime
@@ -25,11 +25,10 @@ class MPCAgent:
     #     model_cfg: DictConfig
     # ):
 
-    def __init__(self, params, cost_weights_dict):
+    def __init__(self, params):
         assert params["ensemble_size"] > 0
 
         self.params = params
-        self.cost_weights_dict = cost_weights_dict
 
         self.state_dim = params["state_dim"] + params["state_dim"] * params["use_object"]
         self.dtu = DataUtils(use_object=params["use_object"])
@@ -52,6 +51,8 @@ class MPCAgent:
         # self.horizon = horizon
         # self.mpc_samples = mpc_samples
         # self.robot_goals = robot_goals
+
+        self.cost_weights_dict = {"distance": 1.}
 
     def __getattr__(self, key):
         return self.params[key]

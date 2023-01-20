@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 import matplotlib.pyplot as plt
 from matplotlib import animation as anim, cm
 import rospy

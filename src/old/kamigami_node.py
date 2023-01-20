@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 from ros_stuff.msg import RobotCmd
 import numpy as np

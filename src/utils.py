@@ -1,5 +1,6 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
+import os
 import numpy as np
 import torch
 
@@ -8,6 +9,8 @@ import tf2_ros
 from std_msgs.msg import Time
 from ros_stuff.msg import RobotCmd, ProcessedStates
 
+
+YAW_OFFSET_PATH = os.path.expanduser("~/kamigami_data/calibration/yaw_offsets.npy")
 
 dimensions = {
     "action_dim": 2,                            # left_pwm, right_pwm

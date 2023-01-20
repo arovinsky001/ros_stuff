@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import rospy
 from ros_stuff.msg import RobotCmd, ImuData

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import os
 import argparse
@@ -10,7 +10,7 @@ from tqdm import trange
 from mpc_agents import MPCAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
-from train_utils import AGENT_PATH, train_from_buffer
+from train_utils import train_from_buffer
 from utils import dimensions, make_state_subscriber
 from environment import Environment
 
