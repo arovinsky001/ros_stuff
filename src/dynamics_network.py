@@ -4,33 +4,58 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from utils import as_tensor, dcn
+from utils import DataUtils, as_tensor, dcn
 
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, global_dtu, hidden_dim=200, hidden_depth=1, lr=0.001, std=0.01, dist=True, use_object=False, scale=True):
+    # def __init__(self,
+    #     robot_ids: list,
+    #     use_object: bool,
+    #     state_dim: int,
+    #     action_dim: int,
+    #     hidden_dim: int,
+    #     hidden_depth: int,
+    #     lr: float,
+    #     dist: bool,
+    #     std: float,
+    #     scale: bool
+    # ):
+
+    def __init__(self, params):
         super(DynamicsNetwork, self).__init__()
 
-        self.hidden_depth = hidden_depth
-        self.dist = dist
-        self.std = std
-        self.use_object = use_object
-        self.scale = scale
-        self.dtu = global_dtu
-        self.update_lr = nn.parameter.Parameter(torch.tensor(lr))
+        self.params = params
 
-        assert hidden_depth >= 1
+        self.dtu = DataUtils(use_object=self.use_object)
+        self.update_lr = nn.parameter.Parameter(torch.tensor(self.lr))
+
+        n_robots = len(self.robot_ids)
+        input_dim = self.action_dim * n_robots + self.state_dim * self.use_object
+        output_dim = self.state_dim * n_robots
+
+        # create networks
+        assert self.hidden_depth >= 1
+
         hidden_layers = []
-        for _ in range(hidden_depth):
-            hidden_layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
-        input_layer = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
-        output_layer = [nn.Linear(hidden_dim, output_dim)]
+        for _ in range(self.hidden_depth):
+            hidden_layers += [nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU()]
+        input_layer = [nn.Linear(input_dim, self.hidden_dim), nn.ReLU()]
+        output_layer = [nn.Linear(self.hidden_dim, output_dim)]
+
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
         self.net.apply(self._init_weights)
 
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=lr)
-        self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=lr)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+        self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=self.lr)
+
+        # self.hidden_depth = hidden_depth
+        # self.dist = dist
+        # self.std = std
+        # self.scale = scale
+
+    def __getattr__(self, key):
+        return self.params[key]
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

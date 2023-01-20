@@ -3,7 +3,10 @@
 import numpy as np
 import torch
 
-from ros_stuff.msg import RobotCmd
+import rospy
+import tf2_ros
+from std_msgs.msg import Time
+from ros_stuff.msg import RobotCmd, ProcessedStates
 
 
 dimensions = {
@@ -60,6 +63,50 @@ def build_action_msg(action, duration, action_num):
     action_msg.duration = duration
     action_msg.action_num = action_num
     return action_msg
+
+def make_state_subscriber():
+    pos_dim = 3
+    vel_dim = 3
+    robot_pos = np.empty(pos_dim)
+    object_pos = np.empty(pos_dim)
+    corner_pos = np.empty(pos_dim)
+    robot_vel = np.empty(vel_dim)
+    object_vel = np.empty(vel_dim)
+
+    def update_state(msg):
+        rs, os, cs = msg.robot_state, msg.object_state, msg.corner_state
+
+        robot_pos[:] = np.array([rs.x, rs.y, rs.yaw])
+        object_pos[:] = np.array([os.x, os.y, os.yaw])
+        corner_pos[:] = np.array([cs.x, cs.y, cs.yaw])
+
+        robot_vel[:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
+        object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
+
+    print("waiting for /processed_state topic from state publisher")
+    rospy.Subscriber("/processed_state", ProcessedStates, update_state, queue_size=1)
+    print("subscribed to /processed_state")
+
+
+    """
+    get action timestamps from kamigami
+    """
+    action_timestamp = np.zeros(1)
+
+    def update_timestamp(msg):
+        action_timestamp[:] = msg.data.to_sec()
+
+    print("waiting for /action_timestamps topic from kamigami")
+    rospy.Subscriber("/action_timestamps", Time, update_timestamp, queue_size=1)
+    print("subscribed to /action_timestamps")
+
+    print("setting up tf buffer/listener")
+    tf_buffer = tf2_ros.Buffer()
+    tf_listener = tf2_ros.TransformListener(tf_buffer)
+    print("finished setting up tf buffer/listener")
+
+    return robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener
+
 
 
 class DataUtils:
