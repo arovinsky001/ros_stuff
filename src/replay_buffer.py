@@ -76,7 +76,7 @@ class ReplayBuffer:
     def restore(self, restore_path=None):
         if restore_path is None:
             # get latest file in save directory
-            list_of_files = glob(os.path.expanduser("~/kamigami_data/*.npz"))
+            list_of_files = glob(self.save_dir + "*.npz")
             restore_path = max(list_of_files, key=os.path.getctime)
 
         data = np.load(restore_path)

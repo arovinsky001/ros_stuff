@@ -5,6 +5,7 @@ from datetime import datetime
 import pickle as pkl
 import numpy as np
 import torch
+from glob import glob
 
 from dynamics_network import DynamicsNetwork
 from utils import DataUtils, signed_angle_difference, dimensions
@@ -26,9 +27,18 @@ class MPCAgent:
     # ):
 
     def __init__(self, params):
-        assert params["ensemble_size"] > 0
-
         self.params = params
+        assert self.ensemble_size > 0
+
+        # weights for MPC cost terms
+        self.cost_weights_dict = {
+            "distance": 1.,
+            "heading": 0.,
+            "action_norm": 0.,
+            "distance_bonus": 0.,
+            "separation": 0.,
+            "heading_difference": 0.,
+        }
 
         self.state_dim = params["state_dim"] + params["state_dim"] * params["use_object"]
         self.dtu = DataUtils(use_object=params["use_object"])
@@ -41,8 +51,10 @@ class MPCAgent:
 
         now = datetime.now()
         date_time = now.strftime("%d_%m_%Y_%H_%M_%S")
-        self.save_dir = os.path.expanduser("~/kamigami_data/agents/")
-        self.save_path = self.save_dir + f"agent{date_time}.npz"
+        self.save_dir = os.path.expanduser(f"~/kamigami_data/agents/")
+
+        self.state_dict_save_dir = self.save_dir + date_time + "/"
+        self.save_paths = [self.state_dict_save_dir + f"state_dict{i}.npz" for i in range(self.ensemble_size)]
 
         # self.ensemble_size = ensemble_size
         # self.batch_size = batch_size
@@ -51,8 +63,6 @@ class MPCAgent:
         # self.horizon = horizon
         # self.mpc_samples = mpc_samples
         # self.robot_goals = robot_goals
-
-        self.cost_weights_dict = {"distance": 1.}
 
     def __getattr__(self, key):
         return self.params[key]
@@ -159,11 +169,22 @@ class MPCAgent:
         return total_costs
 
     def dump(self):
-        if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
+        os.makedirs(self.state_dict_save_dir)
 
-        with open(self.save_path, "wb") as f:
-            pkl.dump(self, f)
+        for model, path in zip(self.models, self.save_paths):
+            torch.save(model.state_dict(), path)
+
+    def restore(self, restore_dir=None):
+        if restore_dir is None:
+            # get latest subdir in save directory (state_dicts saved in subdir)
+            all_subdirs = [d for d in os.listdir(restore_dir) if os.path.isdir(d)]
+            restore_dir = max(all_subdirs, key=os.path.getctime)
+
+        sort_fn = lambda path: int(path.split(".")[-1][-1])
+        restore_paths = os.listdir(restore_dir).sort(key=sort_fn)
+
+        for i in range(self.ensemble_size):
+            self.models[i].load_state_dict(torch.load(restore_paths[i]))
 
     def get_action(self):
         return None, None
