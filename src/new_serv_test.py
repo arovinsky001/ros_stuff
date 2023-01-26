@@ -1,16 +1,16 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import rospy
 from ros_stuff.msg import MultiRobotCmd, ImuData
 
 from std_msgs.msg import Header, Int8
 import sys
-import board
-import adafruit_fxos8700
-import adafruit_fxas21002c
-i2c = board.I2C()
-fxos = adafruit_fxos8700.FXOS8700(i2c)
-fxas = adafruit_fxas21002c.FXAS21002C(i2c)
+# import board
+# import adafruit_fxos8700
+# import adafruit_fxas21002c
+# i2c = board.I2C()
+# fxos = adafruit_fxos8700.FXOS8700(i2c)
+# fxas = adafruit_fxas21002c.FXAS21002C(i2c)
 
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 # from gpiozero import Motor, DigitalOutputDevice

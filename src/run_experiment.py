@@ -67,7 +67,7 @@ class Experiment:
             action, predicted_next_state = self.agent.get_action(state, goals)
             next_state, done = self.env.step(action)
 
-            if state and next_state:
+            if state is not None and next_state is not None:
                 self.replay_buffer.add(state, action, next_state)
 
             if self.update_online:
@@ -93,7 +93,7 @@ class Experiment:
 def main(args):
     rospy.init_node("run_experiment")
 
-    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber()
+    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber(args.robot_ids)
     experiment = Experiment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, **vars(args))
     experiment.run()
 
@@ -102,70 +102,61 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # mpc method
-    agent_subparser = parser.add_subparsers(dest='method')
+    # agent_subparser = parser.add_subparsers(dest='method')
 
-    shooting_parser = agent_subparser.add_parser('shooting')
-    cem_parser = agent_subparser.add_parser('cem')
-    mppi_parser = agent_subparser.add_parser('mppi')
+    # shooting_parser = agent_subparser.add_parser('shooting')
+    # cem_parser = agent_subparser.add_parser('cem')
+    # mppi_parser = agent_subparser.add_parser('mppi')
 
-    cem_parser.add_argument('alpha', default=0.8)
-    cem_parser.add_argument('n_best', default=30)
-    cem_parser.add_argument('refine_iters', default=5)
+    parser.add_argument('-alpha', type=float, default=0.8)
+    parser.add_argument('-n_best', type=int, default=30)
+    parser.add_argument('-refine_iters', type=int, default=5)
 
-    mppi_parser.add_argument('gamma', default=50)
-    mppi_parser.add_argument('beta', default=0.5)
-    mppi_parser.add_argument('noise_std', default=2)
+    parser.add_argument('-gamma', type=int, default=50)
+    parser.add_argument('-beta', type=float, default=0.5)
+    parser.add_argument('-noise_std', type=float, default=2)
 
     # generic
-    parser.add_argument('-robot_ids', nargs='+', default=[0])
-    parser.add_argument('-object_id', default=3)
-    parser.add_argument('-use_object', default=False)
+    parser.add_argument('-robot_ids', nargs='+', type=int, default=[0])
+    parser.add_argument('-object_id', type=int, default=3)
+    parser.add_argument('-use_object', type=bool, default=False)
 
-    parser.add_argument('-n_episodes', default=3)
-    parser.add_argument('-tolerance', default=0.04)
-    parser.add_argument('-episode_length', default=150)
+    parser.add_argument('-n_episodes', type=int, default=3)
+    parser.add_argument('-tolerance', type=float, default=0.04)
+    parser.add_argument('-episode_length', type=int, default=150)
 
-    parser.add_argument('-new_buffer', default=False)
-    parser.add_argument('-pretrain', default=False)
-    parser.add_argument('-meta', default=False)
-    parser.add_argument('-pretrain_samples', default=500)
-    parser.add_argument('-min_train_steps', default=100)
-    parser.add_argument('-train_epochs', default=200)
+    parser.add_argument('-meta', type=bool, default=False)
+    parser.add_argument('-pretrain_samples', type=int, default=500)
+    parser.add_argument('-train_epochs', type=int, default=200)
 
-    parser.add_argument('-plot', default=False)
-    parser.add_argument('-debug', default=False)
+    parser.add_argument('-debug', type=bool, default=False)
 
-    parser.add_argument('-save_agent', default=True)
-    parser.add_argument('-load_agent', default=False)
+    parser.add_argument('-save_agent', type=bool, default=True)
+    parser.add_argument('-load_agent', type=bool, default=False)
 
     # agent
-    parser.add_argument('-ensemble_size', default=1)
-    parser.add_argument('-batch_size', default=10000)
-    parser.add_argument('-update_online', default=False)
-    parser.add_argument('-sample_recent_buffer', default=False)
-    parser.add_argument('-utd_ratio', default=3)
+    parser.add_argument('-ensemble_size', type=int, default=1)
+    parser.add_argument('-batch_size', type=int, default=10000)
+    parser.add_argument('-update_online', type=bool, default=False)
+    parser.add_argument('-sample_recent_buffer', type=bool, default=False)
+    parser.add_argument('-utd_ratio', type=int, default=3)
 
-    parser.add_argument('-agent_state_dim', default=3)
-    parser.add_argument('-action_dim', default=2)
-
-    parser.add_argument('-mpc_horizon', default=5)
-    parser.add_argument('-mpc_samples', default=200)
-    parser.add_argument('-robot_goals', default=True)
+    parser.add_argument('-mpc_horizon', type=int, default=5)
+    parser.add_argument('-mpc_samples', type=int, default=200)
+    parser.add_argument('-robot_goals', type=bool, default=True)
 
     # model
-    parser.add_argument('-model_state_dim', default=4)
+    parser.add_argument('-hidden_dim', type=int, default=200)
+    parser.add_argument('-hidden_depth', type=int, default=1)
+    parser.add_argument('-lr', type=float, default=0.001)
 
-    parser.add_argument('-hidden_dim', default=200)
-    parser.add_argument('-hidden_depth', default=1)
-    parser.add_argument('-lr', default=0.001)
-
-    parser.add_argument('-scale', default=True)
-    parser.add_argument('-dist', default=False)
-    parser.add_argument('-std', default=0.01)
+    parser.add_argument('-scale', type=bool, default=True)
+    parser.add_argument('-dist', type=bool, default=False)
+    parser.add_argument('-std', type=bool, default=0.01)
 
     # replay buffer
-    parser.add_argument('-save_freq', default=50)
-    parser.add_argument('-capacity', default=10000)
+    parser.add_argument('-save_freq', type=int, default=50) # TODO implement this
+    parser.add_argument('-buffer_capacity', type=int, default=10000)
 
     args = parser.parse_args()
     main(args)

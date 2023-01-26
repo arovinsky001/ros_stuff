@@ -38,6 +38,9 @@ class DynamicsNetwork(nn.Module):
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=self.lr)
 
+    def __setattr__(self, name, value):
+        self.__dict__[name] = value
+
     def __getattr__(self, key):
         return self.params[key]
 

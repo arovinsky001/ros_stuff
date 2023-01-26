@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import os
 import numpy as np
@@ -8,7 +8,7 @@ import numpy as np
 import rospy
 from std_msgs.msg import Time
 from sensor_msgs.msg import Image
-from ros_stuff.msg import RobotCmd
+from ros_stuff.msg import MultiRobotCmd
 
 from utils import build_action_msg, YAW_OFFSET_PATH
 
@@ -35,8 +35,8 @@ class Environment:
         self.corner_pos = corner_pos
         self.action_receipt_dict = action_receipt_dict
 
-        self.action_publisher = rospy.Publisher("/action_topic", RobotCmd, queue_size=1)
-        self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, image_callback, queue_size=1)
+        self.action_publisher = rospy.Publisher("/action_topic", MultiRobotCmd, queue_size=1)
+        # self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, image_callback, queue_size=1)
 
         if not calibrate:
             # define centers and radius for figure-8 trajectory
@@ -49,7 +49,7 @@ class Environment:
                 back_circle_center_rel = np.array([0.65, 0.5])
                 front_circle_center_rel = np.array([0.4, 0.5])
 
-            corner_pos = self.state_dict["corner"].copy()
+            corner_pos = self.corner_pos.copy()
             self.back_circle_center = back_circle_center_rel * corner_pos[:2]
             self.front_circle_center = front_circle_center_rel * corner_pos[:2]
             self.radius = np.linalg.norm(self.back_circle_center - self.front_circle_center) / 2
@@ -72,11 +72,12 @@ class Environment:
         action_msg = build_action_msg(action, self.action_duration, self.robot_ids)
         self.action_publisher.publish(action_msg)
 
-        while not all([receipt for receipt in self.action_receipt_dict]):
+        while not all([receipt for receipt in self.action_receipt_dict.values()]):
             rospy.sleep(0.01)
 
         rospy.sleep(self.action_duration + self.post_action_sleep_time)
-        self.action_receipt_dict = [False for _ in range(len(self.action_receipt_dict))]
+        for id in self.action_receipt_dict:
+            self.action_receipt_dict[id] = False
 
         state = self.get_state()
 
@@ -98,7 +99,7 @@ class Environment:
             action = self.agent.get_action(state, init_goal)
             next_state, _ = self.step(action, reset=True)
 
-            if state and next_state:
+            if state is not None and next_state is not None:
                 replay_buffer.add(state, action, next_state)
 
             state = next_state

@@ -19,9 +19,9 @@ class ReplayBuffer:
         action_dim = ACTION_DIM * self.n_robots
 
         # states always stored as [robot_0, robot_1, ..., robot_n, object]
-        self.states = np.empty((self.capacity, state_dim))
-        self.next_states = np.empty((self.capacity, state_dim))
-        self.actions = np.empty((self.capacity, action_dim))
+        self.states = np.empty((self.buffer_capacity, state_dim))
+        self.next_states = np.empty((self.buffer_capacity, state_dim))
+        self.actions = np.empty((self.buffer_capacity, action_dim))
 
         self.full = False
         self.idx = 0
@@ -31,21 +31,19 @@ class ReplayBuffer:
         self.save_dir = os.path.expanduser("~/kamigami_data/buffers/")
         self.save_path = self.save_dir + f"replay{date_time}.npz"
 
-        # self.capacity = capacity
-
     def __getattr__(self, key):
         return self.params[key]
 
     @property
     def size(self):
-        return self.capacity if self.full else self.idx
+        return self.buffer_capacity if self.full else self.idx
 
     def add(self, state, action, next_state):
         np.copyto(self.states[self.idx], state)
         np.copyto(self.actions[self.idx], action)
         np.copyto(self.next_states[self.idx], next_state)
 
-        self.idx = (self.idx + 1) % self.capacity
+        self.idx = (self.idx + 1) % self.buffer_capacity
         if self.idx == 0:
             self.full = True
 

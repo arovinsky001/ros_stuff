@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import os
 import numpy as np
@@ -149,7 +149,7 @@ class DataUtils:
             relative_state = torch.cat((relative_state_to_base_xy, relative_state_sc), dim=1)
             relative_states[:, 4*(i-1):4*i] = relative_state
 
-        return torch.cat(relative_states, dim=1)
+        return relative_states
 
     def compute_relative_delta_xysc(self, state, next_state):
         state, next_state = as_tensor(state, next_state)
