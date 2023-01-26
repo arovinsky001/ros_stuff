@@ -7,6 +7,7 @@ import numpy as np
 
 import rospy
 from std_msgs.msg import Time
+from sensor_msgs.msg import Image
 from ros_stuff.msg import RobotCmd
 
 from utils import build_action_msg, YAW_OFFSET_PATH
@@ -18,6 +19,7 @@ from utils import build_action_msg, YAW_OFFSET_PATH
     #     action_duration: float = 0.2,
     #     episode_length: int = 150,
     # ):
+
 
 class Environment:
     def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, agent, calibrate=False):
@@ -44,7 +46,7 @@ class Environment:
         self.last_action_timestamp = self.action_timestamp.copy()
 
         self.action_publisher = rospy.Publisher("/action_topic", RobotCmd, queue_size=1)
-        # self.camera_img_subscriber = rospy.Subscriber(...)
+        self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, image_callback, queue_size=1)
 
         if not calibrate:
             # define centers and radius for figure-8 trajectory
@@ -73,6 +75,12 @@ class Environment:
 
     def __getattr__(self, key):
         return self.params[key]
+
+    def image_callback(self, msg):
+        ...
+
+        self.current_image = image
+
 
     def step(self, action, reset=False):
         action_msg = build_action_msg(action, self.action_duration, self.episode_step)
@@ -118,7 +126,7 @@ class Environment:
         # get real camera image from a ros subscriber
 
         plot_img = ...
-        real_img = ...
+        real_img = self.current_image.copy()
 
         ...
 

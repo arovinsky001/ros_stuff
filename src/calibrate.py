@@ -25,11 +25,9 @@ def main(args):
 
     robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber()
     env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, None, calibrate=True)
+    yaw_offsets = np.zeros(10)
 
-    args.ids = [0]
     for id in args.ids:
-        yaw_offsets = np.zeros(10)
-
         input(f"Place tag {id} on the left calibration point, aligned with the calibration line and hit enter.")
         left_state = env.get_state()
         input(f"Place tag {id} on the right calibration point, aligned with the calibration line and hit enter.")
@@ -48,13 +46,13 @@ def main(args):
         #     measured_object_angle = object_left_state[2]
         #     yaw_offsets[self.object_id] = true_object_angle - measured_object_angle
 
-        np.save(YAW_OFFSET_PATH, yaw_offsets)
+    np.save(YAW_OFFSET_PATH, yaw_offsets)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-ids", default=[0])
+    parser.add_argument("-ids", nargs='+', type=int)
 
     args = parser.parse_args()
     main(args)
