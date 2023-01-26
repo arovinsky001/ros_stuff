@@ -7,31 +7,20 @@ from torch.nn import functional as F
 from utils import DataUtils, as_tensor, dcn
 
 
-class DynamicsNetwork(nn.Module):
-    # def __init__(self,
-    #     robot_ids: list,
-    #     use_object: bool,
-    #     state_dim: int,
-    #     action_dim: int,
-    #     hidden_dim: int,
-    #     hidden_depth: int,
-    #     lr: float,
-    #     dist: bool,
-    #     std: float,
-    #     scale: bool
-    # ):
+STATE_DIM = 4
+ACTION_DIM = 2
 
+
+class DynamicsNetwork(nn.Module):
     def __init__(self, params):
         super(DynamicsNetwork, self).__init__()
-
         self.params = params
 
-        self.dtu = DataUtils(use_object=self.use_object)
+        self.dtu = DataUtils(params)
         self.update_lr = nn.parameter.Parameter(torch.tensor(self.lr))
 
-        n_robots = len(self.robot_ids)
-        input_dim = self.action_dim * n_robots + self.state_dim * self.use_object
-        output_dim = self.state_dim * n_robots
+        input_dim = ACTION_DIM * self.n_robots + STATE_DIM * (self.n_robots + self.use_object - 1)
+        output_dim = STATE_DIM * (self.n_robots + self.use_object)
 
         # create networks
         assert self.hidden_depth >= 1
@@ -48,11 +37,6 @@ class DynamicsNetwork(nn.Module):
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=self.lr)
-
-        # self.hidden_depth = hidden_depth
-        # self.dist = dist
-        # self.std = std
-        # self.scale = scale
 
     def __getattr__(self, key):
         return self.params[key]

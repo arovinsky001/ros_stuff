@@ -5,32 +5,20 @@ import numpy as np
 import rospy
 from tqdm import trange
 
-from ros_stuff.msg import ProcessedStates, RobotCmd
-from std_msgs.msg import Time
-import tf2_ros
-
 from environment import Environment
 from replay_buffer import ReplayBuffer
 from utils import make_state_subscriber
 
 
 class DataCollector:
-    def __init__(self, robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params):
+    def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params):
         self.params = params
         params["episode_length"] = np.inf
+        params["robot_ids"].sort()
+        params["n_robots"] = len(self.robot_ids)
 
         # states
-        self.robot_vel = robot_vel
-        self.object_vel = object_vel
-        self.state_dict = {
-            "robot": robot_pos,
-            "object": object_pos,
-            "corner": corner_pos,
-        }
-        self.action_timestamp = action_timestamp
-        self.last_action_timestamp = self.action_timestamp.copy()
-
-        self.env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, None)
+        self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, None)
         self.replay_buffer = ReplayBuffer(params)
 
         action_range = np.linspace(-1, 1, np.floor(np.sqrt(self.n_samples)))
@@ -52,7 +40,7 @@ class DataCollector:
 
             while not valid:
                 if self.random_data:
-                    action = np.random.uniform(low=-1., high=1., size=2)
+                    action = np.random.uniform(low=-1., high=1., size=2*self.n_robots)
                 else:
                     action = self.fixed_actions[i]
 
@@ -80,19 +68,17 @@ class DataCollector:
 def main(args):
     rospy.init_node("collect_data")
 
-    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber()
-
-
-    """
-    run experiment
-    """
-    data_collector = DataCollector(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, **vars(args))
+    robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, tf_buffer, tf_listener = make_state_subscriber(args.robot_ids)
+    data_collector = DataCollector(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, **vars(args))
     data_collector.run()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('-robot_ids', nargs='+', default=[0])
+    parser.add_argument('-object_id', default=3)
+    parser.add_argument("-use_object", default=False)
     parser.add_argument("-debug", default=False)
     parser.add_argument("-n_samples", default=20)
     parser.add_argument("-random_data", default=False)

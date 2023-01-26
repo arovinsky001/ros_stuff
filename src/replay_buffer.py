@@ -6,14 +6,22 @@ from datetime import datetime
 from glob import glob
 
 
+STATE_DIM = 3
+ACTION_DIM = 2
+
+
 class ReplayBuffer:
     # def __init__(self, capacity=10000, state_dim=3, action_dim=2):
     def __init__(self, params):
         self.params = params
 
-        self.states = np.empty((self.capacity, self.buffer_state_dim))
-        self.next_states = np.empty((self.capacity, self.buffer_state_dim))
-        self.actions = np.empty((self.capacity, self.action_dim))
+        state_dim = STATE_DIM * (self.n_robots + self.use_object)
+        action_dim = ACTION_DIM * self.n_robots
+
+        # states always stored as [robot_0, robot_1, ..., robot_n, object]
+        self.states = np.empty((self.capacity, state_dim))
+        self.next_states = np.empty((self.capacity, state_dim))
+        self.actions = np.empty((self.capacity, action_dim))
 
         self.full = False
         self.idx = 0

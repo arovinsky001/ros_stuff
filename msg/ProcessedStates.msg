@@ -1,5 +1,4 @@
 Header header
-SingleState robot_state
+SingleState[] robot_states
 SingleState object_state
 SingleState corner_state
-bool moving

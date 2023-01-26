@@ -1,9 +1,9 @@
 #!/usr/bin/python
 
 import rospy
-from ros_stuff.msg import RobotCmd, ImuData
+from ros_stuff.msg import MultiRobotCmd, ImuData
 
-from std_msgs.msg import Time, Header
+from std_msgs.msg import Header, Int8
 import sys
 import board
 import adafruit_fxos8700
@@ -26,9 +26,12 @@ MOTOR_LEFT_BW = 27 # AIN1 - 13, GPIO 27
 
 ac_num = -1
 def kami_callback(msg):
-    print("Hi, I got a message:", msg)
+    print("Message received at time:", rospy.get_rostime())
 
-    left_action, right_action, duration, action_num = msg.left_pwm, msg.right_pwm, msg.duration, msg.action_num
+    for cmd in msg.robot_commands:
+        if cmd.robot_id == robot_id:
+            left_action, right_action, duration = cmd.left_pwm, cmd.right_pwm, cmd.duration
+            break
 
     if left_action > 0:
         motor_left_forward.on()
@@ -47,9 +50,9 @@ def kami_callback(msg):
     motor_left_pwm.value = abs(left_action)
     motor_right_pwm.value = abs(right_action)
 
-    time_msg = Time()
-    time_msg.data = rospy.get_rostime()
-    publisher.publish(time_msg)
+    action_receipt_msg = Int8()
+    action_receipt_msg.data = robot_id
+    publisher.publish(action_receipt_msg)
 
     print(f"{rospy.get_name()}  ||  L: {left_action}  ||  R: {right_action} || T: {duration}")
 
@@ -89,12 +92,12 @@ if __name__ == '__main__':
     rospy.init_node(f'robot_{robot_name}')
 
     print("waiting for /action_topic rostopic")
-    rospy.Subscriber("/action_topic", RobotCmd, kami_callback, queue_size=1)
+    rospy.Subscriber("/action_topic", MultiRobotCmd, kami_callback, queue_size=1)
     print("subscribed to /action_topic")
 
-    publisher = rospy.Publisher("/action_timestamps", Time, queue_size=1)
-    pub = rospy.Publisher("/imu_data", ImuData, queue_size=1)
+    publisher = rospy.Publisher(f"/action_receipt_{robot_id}", Int8, queue_size=1)
+    # pub = rospy.Publisher("/imu_data", ImuData, queue_size=1)
 
     print("rospy spinning")
-    # rospy.spin()
-    stream_data(robot_id)
+    rospy.spin()
+    # stream_data(robot_id)
