@@ -9,8 +9,12 @@ import rospy
 from std_msgs.msg import Time
 from sensor_msgs.msg import Image
 from ros_stuff.msg import RobotCmd
+from cv_bridge import CvBridge
+import matplotlib.pyplot as plt
 
 from utils import build_action_msg, YAW_OFFSET_PATH
+
+cv_bridge = CvBridge()
 
 
 
@@ -63,9 +67,8 @@ class Environment:
         return self.params[key]
 
     def image_callback(self, msg):
-        ...
-
-        self.current_image = image
+        cv_img = cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        self.current_image = cv_img
 
 
     def step(self, action, reset=False):
@@ -106,16 +109,56 @@ class Environment:
         self.reverse_episode = not self.reverse_episode
 
         return state
+    
 
     def render(self):
         # get current state
         # make plot based on relevant states and goals (track self.states or something)
         # get real camera image from a ros subscriber
 
-        plot_img = ...
         real_img = self.current_image.copy()
 
-        ...
+        states = np.array(self.states)
+        goals = np.array(self.goals)
+
+        fig, ax = plt.subplots()
+
+        ax.plot(goals[:, 0], goals[:, 1], color="green", linewidth=1.0, marker="*", label="Goal Trajectory")
+        ax.plot(states[:, 0], states[:, 1], color="red", linewidth=1.0, marker=">", label="Robot Trajectory")
+
+        if self.use_object:
+            ax.plot(states[:, -3], states[:, -2], color="blue", linewidth=1.0, marker=".", label="Object Trajectory")
+
+        ax.axis('equal')
+        ax.set_xlim((self.corner[0], 0))
+        ax.set_ylim((self.corner[1], 0))
+        ax.legend()
+        #fig.show()
+        # Still giving type issues, but need to try running it
+        fig.canvas.draw()
+        plot_img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        plot_img = plot_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+         
+        #  Don't think we need this but commenting out for now
+        #  if len(self.goal_states) == 1 or not self.plot:
+        #      ax = plt.gca()
+        #      ax.axis('equal')
+        #      plt.xlim((self.corner[0], 0))
+        #      plt.ylim((self.corner[1], 0))
+        #      plt.legend()
+        #      plt.ion()
+        #      plt.show()
+
+        #  if save:
+        #      plt.plot(start_state[0], start_state[1], color="orange", marker="D", label="Starting Point", markersize=6)
+        #      plt.title(f"{'Reversed' if reverse_lap else 'Standard'} Trajectory")
+        #      plt.xlabel("X Position")
+        #      plt.ylabel("Y Position")
+        #      plt.legend()
+        #      plt.draw()
+        #      plt.pause(1.)
+
+        #      plt.savefig(self.plot_path + f"lap{laps}_rb{replay_buffer.size}.png")
 
         return plot_img, real_img
 
