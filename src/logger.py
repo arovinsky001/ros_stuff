@@ -15,5 +15,9 @@ class Logger:
             wandb.log(cost_dict, step=step)
             wandb.log(prediction_error_dict, step=step)
 
+    def log_images(self, plot_img, real_img, step):
+        wandb.log({"plot_image": wandb.Image(plot_img)}, step=step)
+        wandb.log({"real_image": wandb.Image(real_img)}, step=step)
+
     def __getattr__(self, key):
         return self.params[key]

@@ -6,7 +6,6 @@ import numpy as np
 # from gym import register
 
 import rospy
-from std_msgs.msg import Time
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import matplotlib.pyplot as plt
@@ -14,14 +13,10 @@ from ros_stuff.msg import MultiRobotCmd
 
 from utils import build_action_msg, YAW_OFFSET_PATH
 
-cv_bridge = CvBridge()
-
-
 
 class Environment:
-    def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, agent, calibrate=False):
+    def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, calibrate=False):
         self.params = params
-        self.agent = agent
 
         self.init_tolerance = 0.04
         self.post_action_sleep_time = 0.3
@@ -39,12 +34,15 @@ class Environment:
         self.corner_pos = corner_pos
         self.action_receipt_dict = action_receipt_dict
 
+        self.episode_states = []
+
+        self.cv_bridge = CvBridge()
         self.action_publisher = rospy.Publisher("/action_topic", MultiRobotCmd, queue_size=1)
-        # self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, image_callback, queue_size=1)
+        self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1)
 
         if not calibrate:
             # define centers and radius for figure-8 trajectory
-            rospy.sleep(0.2)        # wait for states to be published and set
+            rospy.sleep(0.1)        # wait for states to be published and set
 
             if self.robot_goals:
                 back_circle_center_rel = np.array([0.7, 0.5])
@@ -67,9 +65,8 @@ class Environment:
         return self.params[key]
 
     def image_callback(self, msg):
-        cv_img = cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        cv_img = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self.current_image = cv_img
-
 
     def step(self, action, reset=False):
         action_msg = build_action_msg(action, self.action_duration, self.robot_ids)
@@ -83,6 +80,7 @@ class Environment:
             self.action_receipt_dict[id] = False
 
         state = self.get_state()
+        self.episode_states.append(state)
 
         if not reset:
             self.episode_step += 1
@@ -91,7 +89,7 @@ class Environment:
 
         return state, done
 
-    def reset(self, replay_buffer):
+    def reset(self, agent, replay_buffer):
         self.episode_step = 0
         self.begin_episode_step = np.floor(np.random.rand() * self.episode_length)
 
@@ -99,18 +97,19 @@ class Environment:
         state = self.get_state()
 
         while np.linalg.norm(init_goal - state) > self.init_tolerance:
-            action = self.agent.get_action(state, init_goal)
+            action = agent.get_action(state, init_goal)
             next_state, _ = self.step(action, reset=True)
 
-            if state is not None and next_state is not None:
+            if next_state is not None:
                 replay_buffer.add(state, action, next_state)
+                state = next_state
+            else:
+                state = self.get_state()
 
-            state = next_state
-
+        self.episode_states = []
         self.reverse_episode = not self.reverse_episode
 
         return state
-    
 
     def render(self):
         # get current state
@@ -119,47 +118,34 @@ class Environment:
 
         real_img = self.current_image.copy()
 
-        states = np.array(self.states)
-        goals = np.array(self.goals)
+        states = np.array(self.episode_states)
+        robot_states_dict = {id: states[:, 3*i, 3*(i+1)] for i, id in enumerate(self.robot_ids)}
+        object_states = states[:, -3:]
+        goal_states = self.get_next_n_goals(self.episode_step, episode_step=0)
 
         fig, ax = plt.subplots()
+        linewidth = 0.7
 
-        ax.plot(goals[:, 0], goals[:, 1], color="green", linewidth=1.0, marker="*", label="Goal Trajectory")
-        ax.plot(states[:, 0], states[:, 1], color="red", linewidth=1.0, marker=">", label="Robot Trajectory")
+        ax.plot(goal_states[:, 0], goal_states[:, 1], color="green", linewidth=linewidth, marker="*", label="Goal Trajectory")
+
+        colors = ["red", "pink"]
+        for i, id, robot_states in enumerate(robot_states_dict.items()):
+            ax.plot(robot_states[:, 0], robot_states[:, 1], color=colors[i], linewidth=linewidth, marker=">", label=f"Robot{id} Trajectory")
 
         if self.use_object:
-            ax.plot(states[:, -3], states[:, -2], color="blue", linewidth=1.0, marker=".", label="Object Trajectory")
+            ax.plot(object_states[:, 0], object_states[:, 1], color="blue", linewidth=linewidth, marker=".", label="Object Trajectory")
 
         ax.axis('equal')
-        ax.set_xlim((self.corner[0], 0))
-        ax.set_ylim((self.corner[1], 0))
+        ax.set_xlim((self.corner_pos[0], 0))
+        ax.set_ylim((self.corner_pos[1], 0))
         ax.legend()
+
         #fig.show()
         # Still giving type issues, but need to try running it
+
         fig.canvas.draw()
         plot_img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
         plot_img = plot_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-         
-        #  Don't think we need this but commenting out for now
-        #  if len(self.goal_states) == 1 or not self.plot:
-        #      ax = plt.gca()
-        #      ax.axis('equal')
-        #      plt.xlim((self.corner[0], 0))
-        #      plt.ylim((self.corner[1], 0))
-        #      plt.legend()
-        #      plt.ion()
-        #      plt.show()
-
-        #  if save:
-        #      plt.plot(start_state[0], start_state[1], color="orange", marker="D", label="Starting Point", markersize=6)
-        #      plt.title(f"{'Reversed' if reverse_lap else 'Standard'} Trajectory")
-        #      plt.xlabel("X Position")
-        #      plt.ylabel("Y Position")
-        #      plt.legend()
-        #      plt.draw()
-        #      plt.pause(1.)
-
-        #      plt.savefig(self.plot_path + f"lap{laps}_rb{replay_buffer.size}.png")
 
         return plot_img, real_img
 
@@ -211,11 +197,14 @@ class Environment:
         goal = center + np.array([np.cos(theta), np.sin(theta)]) * self.radius
         return np.block([goal, 0.])
 
-    def get_next_n_goals(self, n):
+    def get_next_n_goals(self, n, episode_step=None):
         goals = np.empty((n, 3))
 
+        if episode_step is None:
+            episode_step = self.episode_step
+
         for i in range(n):
-            step = self.episode_step + i * (-1 if self.reverse_episode else 1)
+            step = episode_step + i * (-1 if self.reverse_episode else 1)
             goals[i] = self.get_goal(step_override=step)
 
         return goals

@@ -6,8 +6,6 @@ from torch.nn import functional as F
 
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-
-import pickle as pkl
 from tqdm import tqdm
 
 from utils import dcn, as_tensor

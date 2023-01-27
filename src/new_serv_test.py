@@ -1,19 +1,12 @@
 #!/usr/bin/python3
 
-import rospy
-from ros_stuff.msg import MultiRobotCmd, ImuData
-
-from std_msgs.msg import Header, Int8
 import sys
-# import board
-# import adafruit_fxos8700
-# import adafruit_fxas21002c
-# i2c = board.I2C()
-# fxos = adafruit_fxos8700.FXOS8700(i2c)
-# fxas = adafruit_fxas21002c.FXAS21002C(i2c)
+
+import rospy
+from ros_stuff.msg import MultiRobotCmd
+from std_msgs.msg import Int8
 
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
-# from gpiozero import Motor, DigitalOutputDevice
 
 # below are the correct ones for us
 MOTOR_STANDBY = 17 # STBY - 11, GPIO 17
@@ -61,19 +54,6 @@ def kami_callback(msg):
     motor_left_pwm.off()
     motor_right_pwm.off()
 
-def stream_data(robot_id):
-    global ac_num
-    while not rospy.is_shutdown():
-        if ac_num >= 0:
-            msg = ImuData()
-            msg.a_x, msg.a_y, _ = fxos.accelerometer
-            msg.m_x, msg.m_y, _ = fxos.magnetometer
-            msg.action_num = ac_num
-            msg.robot_id = robot_id
-            msg.header = Header()
-            msg.header.stamp = rospy.Time.now()
-            print("msg:", msg)
-            pub.publish(msg)
 
 if __name__ == '__main__':
     motor_standby = DigitalOutputDevice(MOTOR_STANDBY)
@@ -96,8 +76,6 @@ if __name__ == '__main__':
     print("subscribed to /action_topic")
 
     publisher = rospy.Publisher(f"/action_receipt_{robot_id}", Int8, queue_size=1)
-    # pub = rospy.Publisher("/imu_data", ImuData, queue_size=1)
 
     print("rospy spinning")
     rospy.spin()
-    # stream_data(robot_id)
