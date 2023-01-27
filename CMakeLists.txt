@@ -52,6 +52,7 @@ find_package(catkin REQUIRED COMPONENTS
 add_message_files(
   FILES
   RobotCmd.msg
+  MultiRobotCmd.msg
   SingleState.msg
   ProcessedStates.msg
   ImuData.msg

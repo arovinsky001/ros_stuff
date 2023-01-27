@@ -62,7 +62,7 @@
     <arg name="corner_id" 	     	default="9" />
 
 	<node name="state_publisher" pkg="ros_stuff" type="state_publisher.py" output="screen">
-		<rosparam param="robot_id"       subst_value="True">$(arg robot_id)</rosparam>
+		<rosparam param="robot_ids"       subst_value="True">$(arg robot_ids)</rosparam>
 		<param name="object_id"          type="int" value="$(arg object_id)" />
 		<param name="base_id"       	 type="int" value="$(arg base_id)" />
 		<param name="corner_id"          type="int" value="$(arg corner_id)" />

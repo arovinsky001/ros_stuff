@@ -11,17 +11,18 @@ from utils import make_state_subscriber
 
 
 class DataCollector:
-    def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params):
+    def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, **params):
         self.params = params
         params["episode_length"] = np.inf
         params["robot_ids"].sort()
         params["n_robots"] = len(self.robot_ids)
+        params["robot_goals"] = False
 
         # states
         self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, None)
         self.replay_buffer = ReplayBuffer(params)
 
-        action_range = np.linspace(-1, 1, np.floor(np.sqrt(self.n_samples)))
+        action_range = np.linspace(-1, 1, np.floor(np.sqrt(self.n_samples)).astype("int"))
         left_actions, right_actions = np.meshgrid(action_range, action_range)
         self.fixed_actions = np.stack((left_actions, right_actions)).transpose(2, 1, 0).reshape(-1, 2)
 
@@ -46,7 +47,7 @@ class DataCollector:
 
                 next_state, _ = self.env.step(action)
 
-                if state and next_state:
+                if state is not None and next_state is not None:
                     self.replay_buffer.add(state, action, next_state)
                     state = next_state
                     valid = True
@@ -76,12 +77,13 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-robot_ids', nargs='+', default=[0])
-    parser.add_argument('-object_id', default=3)
-    parser.add_argument("-use_object", default=False)
-    parser.add_argument("-debug", default=False)
-    parser.add_argument("-n_samples", default=20)
-    parser.add_argument("-random_data", default=False)
+    parser.add_argument('-robot_ids', nargs='+', type=int, default=[0])
+    parser.add_argument('-object_id', type=int, default=3)
+    parser.add_argument("-use_object", type=bool, default=False)
+    parser.add_argument("-debug", type=bool, default=False)
+    parser.add_argument("-n_samples", type=int, default=20)
+    parser.add_argument("-random_data", type=bool, default=False)
+    parser.add_argument("-buffer_capacity", type=int, default=10000)
 
     args = parser.parse_args()
     main(args)

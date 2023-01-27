@@ -76,7 +76,7 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
     plt.show()
 
 def train(agent, train_state, train_action, train_next_state, validation_buffer, epochs=5, batch_size=256, set_scalers=False, meta=False):
-    state, action, next_state = as_tensor(state, action, next_state)
+    train_state, train_action, train_next_state = as_tensor(train_state, train_action, train_next_state)
 
     val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.size)
     val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
