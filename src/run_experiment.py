@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import trange
 import rospy
 
-from mpc_agents import MPCAgent
+from mpc_agents import RandomShootingAgent, CEMAgent, MPPIAgent
 from replay_buffer import ReplayBuffer
 from logger import Logger
 from train_utils import train_from_buffer
@@ -24,8 +24,15 @@ class Experiment:
         self.params = params
         params["n_robots"] = len(self.robot_ids)
 
-        self.agent = MPCAgent(params)
-        self.env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, self.agent)
+        if self.mpc_method == 'mppi':
+            self.agent = MPPIAgent(params)
+        elif self.mpc_method == 'cem':
+            self.agent = CEMAgent(params)
+        elif self.mpc_method == 'shooting':
+            self.agent = RandomShootingAgent(params)
+        else:
+            raise ValueError
+        self.env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params)
         self.replay_buffer = ReplayBuffer(params)
         self.replay_buffer.restore()
 
@@ -44,7 +51,7 @@ class Experiment:
                 meta=self.meta,
             )
 
-        self.logger = Logger(params)
+        # self.logger = Logger(params)
         np.set_printoptions(suppress=True)
 
     def __getattr__(self, key):
@@ -52,18 +59,19 @@ class Experiment:
 
     def run(self):
         # warmup robot before running actual experiment
-        if not self.debug:
-            for _ in trange(5, desc="Warmup Steps"):
-                random_max_action = np.random.choice([0.999, -0.999], size=2)
-                self.env.step(random_max_action)
+        # if not self.debug:
+        #     for _ in trange(5, desc="Warmup Steps"):
+        #         random_max_action = np.random.choice([0.999, -0.999], size=2)
+        #         self.env.step(random_max_action)
 
         state = self.env.reset(self.agent, self.replay_buffer)
+        # state = self.env.get_state()
         done = False
         episode = 0
         step = 0
 
         while not rospy.is_shutdown():
-            goals = self.env.get_next_n_goals(self.agent.policy.mpc_horizon)
+            goals = self.env.get_next_n_goals(self.agent.mpc_horizon)
             action, predicted_next_state = self.agent.get_action(state, goals)
             next_state, done = self.env.step(action)
 
@@ -76,7 +84,7 @@ class Experiment:
                         model.update(*self.replay_buffer_sample_fn(self.batch_size))
 
             # self.logger.log_step(state, next_state, predicted_next_state, self.env)
-            self.logger.log_images(*self.env.render())
+            # self.logger.log_images(*self.env.render(), step)
 
             if done:
                 episode += 1
@@ -123,6 +131,7 @@ if __name__ == '__main__':
     parser.add_argument('-robot_ids', nargs='+', type=int, default=[0])
     parser.add_argument('-object_id', type=int, default=3)
     parser.add_argument('-use_object', action='store_true')
+    parser.add_argument('-exp_name', type=str)
 
     parser.add_argument('-n_episodes', type=int, default=3)
     parser.add_argument('-tolerance', type=float, default=0.04)

@@ -59,7 +59,10 @@ def build_action_msg(action, duration, robot_ids):
     multi_action_msg = MultiRobotCmd()
     multi_action_msg.robot_commands = []
 
-    action_list = np.split(action, len(action) / 2.)
+    try:
+        action_list = np.split(action, len(action) / 2.)
+    except:
+        import pdb;pdb.set_trace()
 
     for action, id in zip(action_list, robot_ids):
         action_msg = RobotCmd()
@@ -133,7 +136,7 @@ class DataUtils:
         state = as_tensor(state)
 
         n_states = self.n_robots + self.use_object
-        relative_states = torch.empty((state.size(0), 4*n_states))
+        relative_states = torch.empty((state.size(0), 4*(n_states-1)))
         base_xy, base_heading = state[:, :2], state[:, 2]
 
         for i in range(1, n_states):

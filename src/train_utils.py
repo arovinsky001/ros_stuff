@@ -36,7 +36,7 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
     print("\nMIN TEST LOSS EPOCH:", test_losses.argmin())
     print("MIN TEST LOSS:", test_losses.min())
 
-    val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.capacity)
+    val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.buffer_capacity)
     val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
     val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 

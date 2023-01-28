@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 import wandb
-
+import cv2
 
 class Logger:
     def __init__(self, params):
@@ -16,8 +16,14 @@ class Logger:
             wandb.log(prediction_error_dict, step=step)
 
     def log_images(self, plot_img, real_img, step):
-        wandb.log({"plot_image": wandb.Image(plot_img)}, step=step)
-        wandb.log({"real_image": wandb.Image(real_img)}, step=step)
+        if not self.debug:
+            if plot_img is not None:
+                plot_img = cv2.resize(plot_img, (plot_img.shape[1] // 10, plot_img.shape[0] // 10))
+
+                wandb.log({"plot_image": wandb.Image(plot_img)}, step=step)
+
+            real_img = cv2.resize(real_img, (real_img.shape[1] // 20, real_img.shape[0] // 20))
+            wandb.log({"real_image": wandb.Image(real_img)}, step=step)
 
     def __getattr__(self, key):
         return self.params[key]

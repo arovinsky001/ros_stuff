@@ -56,6 +56,7 @@ class DataCollector:
 
         print("\nDATA COLLECTED, SAVING REPLAY BUFFER\n")
         self.replay_buffer.dump()
+        print("\nREPLAY BUFFER SAVED\n")
 
     def take_warmup_steps(self):
         if self.debug:
@@ -79,11 +80,12 @@ if __name__ == "__main__":
 
     parser.add_argument('-robot_ids', nargs='+', type=int, default=[0])
     parser.add_argument('-object_id', type=int, default=3)
-    parser.add_argument("-use_object", type=bool, default=False)
-    parser.add_argument("-debug", type=bool, default=False)
     parser.add_argument("-n_samples", type=int, default=20)
-    parser.add_argument("-random_data", type=bool, default=False)
     parser.add_argument("-buffer_capacity", type=int, default=10000)
+
+    parser.add_argument("-use_object", action='store_true')
+    parser.add_argument("-debug", action='store_true')
+    parser.add_argument("-random_data", action='store_true')
 
     args = parser.parse_args()
     main(args)

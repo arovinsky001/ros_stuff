@@ -51,14 +51,16 @@ class MPCAgent:
         return self.params[key]
 
     def simulate(self, initial_state, action_sequence):
-        initial_state = np.tile(initial_state, (self.mpc_samples, 1))
-        pred_state_sequence = np.empty((len(self.models), self.mpc_samples, self.mpc_horizon, self.state_dim))
+        mpc_samples, mpc_horizon = action_sequence.shape[0], action_sequence.shape[1]
+        initial_state = np.tile(initial_state, (mpc_samples, 1))
+        pred_state_sequence = np.empty((len(self.models), mpc_samples, mpc_horizon, self.state_dim))
 
         for i, model in enumerate(self.models):
             model.eval()
 
-            for t in range(self.mpc_horizon):
+            for t in range(mpc_horizon):
                 action = action_sequence[:, t]
+
                 with torch.no_grad():
                     if t == 0:
                         pred_state_sequence[i, :, t] = model(initial_state, action, sample=False, delta=False)
@@ -77,7 +79,7 @@ class MPCAgent:
         # discount costs through time
         # discount = (1 - 1 / (4 * self.mpc_horizon)) ** np.arange(self.mpc_horizon)
 
-        discount = 0.95 ** np.arange(self.mpc_horizon)
+        discount = 0.8 ** np.arange(self.mpc_horizon)
         ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
@@ -105,13 +107,13 @@ class MPCAgent:
         for i in range(self.ensemble_size):
             self.models[i].load_state_dict(torch.load(restore_paths[i]))
 
-    def get_action(self):
+    def get_action(self, init_state, goals):
         return None, None
 
 
 class RandomShootingAgent(MPCAgent):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, params, **kwargs):
+        super().__init__(params, **kwargs)
 
     def get_action(self, initial_state, goals):
         sampled_actions = np.random.uniform(-1, 1, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
@@ -120,14 +122,14 @@ class RandomShootingAgent(MPCAgent):
 
         best_idx = total_costs.argmin()
         best_action = sampled_actions[best_idx, 0]
-        predicted_next_state = predicted_state_sequence[:, best_idx, 0].squeeze()
+        predicted_next_state = predicted_state_sequence[:, best_idx, 0].mean(axis=0).squeeze()
 
         return best_action, predicted_next_state
 
 
 class CEMAgent(MPCAgent):
-    def __init__(self, **kwargs):
-        return super().__init__(**kwargs)
+    def __init__(self, params, **kwargs):
+        return super().__init__(params, **kwargs)
 
     def get_action(self, initial_state, goals):
         action_trajectory_dim = self.action_dim * self.mpc_horizon
@@ -157,15 +159,15 @@ class CEMAgent(MPCAgent):
                 break
 
         best_action = trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
 
         return best_action, predicted_next_state
 
 
 class MPPIAgent(MPCAgent):
-    def __init__(self, **kwargs):
+    def __init__(self, params, **kwargs):
         self.trajectory_mean = None
-        return super().__init__(**kwargs)
+        return super().__init__(params, **kwargs)
 
     def get_action(self, initial_state, goals):
         if self.trajectory_mean is None:

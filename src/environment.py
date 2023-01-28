@@ -20,7 +20,7 @@ class Environment:
 
         self.init_tolerance = 0.04
         self.post_action_sleep_time = 0.3
-        self.action_duration = 0.2
+        self.action_duration = 0.2 if self.use_object else 0.2
 
         self.episode_step = 0
         self.begin_episode_step = np.floor(np.random.rand() * self.episode_length)
@@ -96,8 +96,15 @@ class Environment:
         init_goal = self.get_next_n_goals(1)
         state = self.get_state()
 
-        while np.linalg.norm(init_goal - state) > self.init_tolerance:
-            action = agent.get_action(state, init_goal)
+        if self.robot_goals:
+            reference_state = state[:3]
+        else:
+            reference_state = state[-3:]
+
+        while np.linalg.norm((init_goal - reference_state)[:, :2]) > self.init_tolerance:
+            print("DISTANCE:", np.linalg.norm((init_goal - reference_state)[:, :2]))
+
+            action, predicted_next_state = agent.get_action(state, init_goal)
             next_state, _ = self.step(action, reset=True)
 
             if next_state is not None:
@@ -105,6 +112,16 @@ class Environment:
                 state = next_state
             else:
                 state = self.get_state()
+
+            if self.robot_goals:
+                reference_state = state[:3]
+            else:
+                reference_state = state[-3:]
+
+            if self.update_online:
+                for model in agent.models:
+                    for _ in range(self.utd_ratio):
+                        model.update(*replay_buffer.sample(self.batch_size))
 
         self.episode_states = []
         self.reverse_episode = not self.reverse_episode
@@ -119,7 +136,7 @@ class Environment:
         real_img = self.current_image.copy()
 
         states = np.array(self.episode_states)
-        robot_states_dict = {id: states[:, 3*i, 3*(i+1)] for i, id in enumerate(self.robot_ids)}
+        robot_states_dict = {id: states[:, 3*i:3*(i+1)] for i, id in enumerate(self.robot_ids)}
         object_states = states[:, -3:]
         goal_states = self.get_next_n_goals(self.episode_step, episode_step=0)
 
@@ -129,7 +146,7 @@ class Environment:
         ax.plot(goal_states[:, 0], goal_states[:, 1], color="green", linewidth=linewidth, marker="*", label="Goal Trajectory")
 
         colors = ["red", "pink"]
-        for i, id, robot_states in enumerate(robot_states_dict.items()):
+        for i, (id, robot_states) in enumerate(robot_states_dict.items()):
             ax.plot(robot_states[:, 0], robot_states[:, 1], color=colors[i], linewidth=linewidth, marker=">", label=f"Robot{id} Trajectory")
 
         if self.use_object:
@@ -140,12 +157,11 @@ class Environment:
         ax.set_ylim((self.corner_pos[1], 0))
         ax.legend()
 
-        #fig.show()
-        # Still giving type issues, but need to try running it
-
         fig.canvas.draw()
         plot_img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
         plot_img = plot_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+        plt.close(fig)
 
         return plot_img, real_img
 
