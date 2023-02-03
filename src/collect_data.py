@@ -62,8 +62,9 @@ class DataCollector:
         if self.debug:
             return
 
+        rospy.sleep(1)
         for _ in trange(5, desc="Warmup Steps"):
-            random_max_action = np.random.choice([0.999, -0.999], size=2)
+            random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
             self.env.step(random_max_action)
 
 

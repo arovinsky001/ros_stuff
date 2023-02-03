@@ -20,7 +20,7 @@ class Environment:
 
         self.init_tolerance = 0.04
         self.post_action_sleep_time = 0.3
-        self.action_duration = 0.2 if self.use_object else 0.2
+        self.action_duration = 0.4 if self.use_object else 0.2
 
         self.episode_step = 0
         self.begin_episode_step = np.floor(np.random.rand() * self.episode_length)
@@ -48,8 +48,8 @@ class Environment:
                 back_circle_center_rel = np.array([0.7, 0.5])
                 front_circle_center_rel = np.array([0.4, 0.5])
             else:
-                back_circle_center_rel = np.array([0.65, 0.5])
-                front_circle_center_rel = np.array([0.4, 0.5])
+                back_circle_center_rel = np.array([0.72, 0.5])
+                front_circle_center_rel = np.array([0.38, 0.5])
 
             corner_pos = self.corner_pos.copy()
             self.back_circle_center = back_circle_center_rel * corner_pos[:2]
@@ -60,6 +60,8 @@ class Environment:
             self.yaw_offsets = np.load(YAW_OFFSET_PATH)
         else:
             self.yaw_offsets = np.zeros(10)
+
+        self.corner_pos_perm = corner_pos
 
     def __getattr__(self, key):
         return self.params[key]
@@ -102,7 +104,7 @@ class Environment:
             reference_state = state[-3:]
 
         while np.linalg.norm((init_goal - reference_state)[:, :2]) > self.init_tolerance:
-            print("DISTANCE:", np.linalg.norm((init_goal - reference_state)[:, :2]))
+            print("\nDISTANCE:", np.linalg.norm((init_goal - reference_state)[:, :2]))
 
             action, predicted_next_state = agent.get_action(state, init_goal)
             next_state, _ = self.step(action, reset=True)
@@ -145,7 +147,7 @@ class Environment:
 
         ax.plot(goal_states[:, 0], goal_states[:, 1], color="green", linewidth=linewidth, marker="*", label="Goal Trajectory")
 
-        colors = ["red", "pink"]
+        colors = ["red", "purple"]
         for i, (id, robot_states) in enumerate(robot_states_dict.items()):
             ax.plot(robot_states[:, 0], robot_states[:, 1], color=colors[i], linewidth=linewidth, marker=">", label=f"Robot{id} Trajectory")
 
@@ -153,8 +155,8 @@ class Environment:
             ax.plot(object_states[:, 0], object_states[:, 1], color="blue", linewidth=linewidth, marker=".", label="Object Trajectory")
 
         ax.axis('equal')
-        ax.set_xlim((self.corner_pos[0], 0))
-        ax.set_ylim((self.corner_pos[1], 0))
+        ax.set_xlim((self.corner_pos_perm[0], 0))
+        ax.set_ylim((self.corner_pos_perm[1], 0))
         ax.legend()
 
         fig.canvas.draw()
@@ -220,7 +222,7 @@ class Environment:
             episode_step = self.episode_step
 
         for i in range(n):
-            step = episode_step + i * (-1 if self.reverse_episode else 1)
+            step = (episode_step + i) * (-1 if self.reverse_episode else 1)
             goals[i] = self.get_goal(step_override=step)
 
         return goals

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import argparse
 import numpy as np
@@ -23,8 +23,9 @@ def main(args):
         "use_object": False,
     }
 
-    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber()
-    env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, None, calibrate=True)
+    robot_ids = args.ids[:-1]
+    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber(robot_ids)
+    env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, calibrate=True)
     yaw_offsets = np.zeros(10)
 
     for id in args.ids:

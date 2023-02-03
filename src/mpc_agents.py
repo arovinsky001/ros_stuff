@@ -98,11 +98,12 @@ class MPCAgent:
     def restore(self, restore_dir=None):
         if restore_dir is None:
             # get latest subdir in save directory (state_dicts saved in subdir)
-            all_subdirs = [d for d in os.listdir(restore_dir) if os.path.isdir(d)]
+            all_subdirs = [os.path.join(self.save_dir, d) for d in os.listdir(self.save_dir) if os.path.isdir(os.path.join(self.save_dir, d))]
             restore_dir = max(all_subdirs, key=os.path.getctime)
 
-        sort_fn = lambda path: int(path.split(".")[-1][-1])
-        restore_paths = os.listdir(restore_dir).sort(key=sort_fn)
+        sort_fn = lambda path: int(path.split(".")[0][-1])
+        restore_paths = [os.path.join(restore_dir, f) for f in os.listdir(restore_dir)]
+        restore_paths.sort(key=sort_fn)
 
         for i in range(self.ensemble_size):
             self.models[i].load_state_dict(torch.load(restore_paths[i]))

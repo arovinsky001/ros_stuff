@@ -59,21 +59,30 @@ class Experiment:
 
     def run(self):
         # warmup robot before running actual experiment
-        # if not self.debug:
-        #     for _ in trange(5, desc="Warmup Steps"):
-        #         random_max_action = np.random.choice([0.999, -0.999], size=2)
-        #         self.env.step(random_max_action)
+        if not self.debug:
+            rospy.sleep(1)
+            # for _ in trange(5, desc="Warmup Steps"):
+            #     random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
+            #     self.env.step(random_max_action)
 
         state = self.env.reset(self.agent, self.replay_buffer)
         # state = self.env.get_state()
         done = False
         episode = 0
         step = 0
+        plot_imgs = []
+        real_imgs = []
 
         while not rospy.is_shutdown():
             goals = self.env.get_next_n_goals(self.agent.mpc_horizon)
             action, predicted_next_state = self.agent.get_action(state, goals)
             next_state, done = self.env.step(action)
+
+            relevant_state = state[:2] if self.robot_goals else state[-3:-1]
+            relevant_pred =  predicted_next_state[:2] if self.robot_goals else predicted_next_state[-3:-1]
+            relevant_next = next_state[:2] if self.robot_goals else next_state[-3:-1]
+            print("\nDISTANCE FROM GOAL:", np.linalg.norm(relevant_next - goals[0, :2]))
+            print("PREDICTION ERROR:", np.linalg.norm(relevant_pred - relevant_next))
 
             if state is not None and next_state is not None:
                 self.replay_buffer.add(state, action, next_state)
@@ -86,8 +95,36 @@ class Experiment:
             # self.logger.log_step(state, next_state, predicted_next_state, self.env)
             # self.logger.log_images(*self.env.render(), step)
 
+            plot_img, real_img = self.env.render()
+            plot_imgs.append(plot_img)
+            real_imgs.append(real_img)
+
             if done:
                 episode += 1
+
+                if episode == 2:
+                    fps = 7
+
+                    import cv2
+                    height, width = plot_imgs[0].shape[0], plot_imgs[0].shape[1]
+                    video = cv2.VideoWriter("/home/arovinsky/Desktop/plot_movie_0.avi", cv2.VideoWriter_fourcc(*'XVID'), fps, (width,height))
+
+                    for plot_img in plot_imgs:
+                        video.write(plot_img)
+
+                    video.release()
+
+                    div_factor = 1
+                    height, width = real_imgs[0].shape[0] // div_factor, real_imgs[0].shape[1] // div_factor
+                    video = cv2.VideoWriter("/home/arovinsky/Desktop/real_movie_0.avi", cv2.VideoWriter_fourcc(*'XVID'), fps, (width,height))
+
+                    for real_img in real_imgs:
+                        video.write(cv2.resize(real_img, (real_img.shape[1] // div_factor, real_img.shape[0] // div_factor)))
+
+                    video.release()
+
+                plot_imgs = []
+                real_imgs = []
 
                 if episode == self.n_episodes:
                     rospy.signal_shutdown(f"Experiment finished! Did {self.n_episodes} rollouts.")
