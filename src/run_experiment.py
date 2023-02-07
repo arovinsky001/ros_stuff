@@ -1,8 +1,11 @@
 #!/usr/bin/python
 
+import os
 import argparse
 import numpy as np
 from tqdm import trange
+from datetime import datetime
+import cv2
 import rospy
 
 from mpc_agents import RandomShootingAgent, CEMAgent, MPPIAgent
@@ -52,6 +55,15 @@ class Experiment:
             )
 
         # self.logger = Logger(params)
+
+        now = datetime.now()
+        self.date_time = now.strftime("%d_%m_%Y_%H_%M_%S")
+
+        self.model_error_dir = os.path.expanduser(f"~/kamigami_data/model_errors/")
+        self.distance_cost_dir = os.path.expanduser(f"~/kamigami_data/distance_costs/")
+        os.makedirs(model_error_dir)
+        os.makedirs(distance_cost_dir)
+
         np.set_printoptions(suppress=True)
 
     def __getattr__(self, key):
@@ -70,8 +82,12 @@ class Experiment:
         done = False
         episode = 0
         step = 0
+
         plot_imgs = []
         real_imgs = []
+
+        model_errors = []
+        distance_costs = []
 
         while not rospy.is_shutdown():
             goals = self.env.get_next_n_goals(self.agent.mpc_horizon)
@@ -92,39 +108,33 @@ class Experiment:
                     for _ in range(self.utd_ratio):
                         model.update(*self.replay_buffer_sample_fn(self.batch_size))
 
-            # self.logger.log_step(state, next_state, predicted_next_state, self.env)
-            # self.logger.log_images(*self.env.render(), step)
+            # log model errors and performance costs
+            model_error = next_state - predicted_next_state
+            distance_cost = np.linalg.norm(next_state[-3:-1] - goals[0, :2])
 
-            plot_img, real_img = self.env.render()
-            plot_imgs.append(plot_img)
-            real_imgs.append(real_img)
+            model_errors.append(model_error)
+            distance_costs.append(distance_cost)
+
+            if self.record_video:
+                plot_img, real_img = self.env.render()
+                plot_imgs.append(plot_img)
+                real_imgs.append(real_img)
 
             if done:
-                episode += 1
+                model_error_fname = self.model_error_dir + f"{self.date_time}_episode{episode}.npy"
+                distance_cost_fname = self.distance_cost_dir + f"{self.date_time}_episode{episode}.npy"
 
-                if episode == 2:
-                    fps = 7
+                np.save(model_error_fname, np.array(model_errors))
+                np.save(distance_cost_fname, np.array(distance_costs))
 
-                    import cv2
-                    height, width = plot_imgs[0].shape[0], plot_imgs[0].shape[1]
-                    video = cv2.VideoWriter("/home/arovinsky/Desktop/plot_movie_0.avi", cv2.VideoWriter_fourcc(*'XVID'), fps, (width,height))
-
-                    for plot_img in plot_imgs:
-                        video.write(plot_img)
-
-                    video.release()
-
-                    div_factor = 1
-                    height, width = real_imgs[0].shape[0] // div_factor, real_imgs[0].shape[1] // div_factor
-                    video = cv2.VideoWriter("/home/arovinsky/Desktop/real_movie_0.avi", cv2.VideoWriter_fourcc(*'XVID'), fps, (width,height))
-
-                    for real_img in real_imgs:
-                        video.write(cv2.resize(real_img, (real_img.shape[1] // div_factor, real_img.shape[0] // div_factor)))
-
-                    video.release()
+                if self.record_video:
+                    log_video(plot_imgs, "plot_movie.avi", fps=7)
+                    log_video(real_imgs, "real_movie.avi", fps=7)
 
                 plot_imgs = []
                 real_imgs = []
+
+                episode += 1
 
                 if episode == self.n_episodes:
                     rospy.signal_shutdown(f"Experiment finished! Did {self.n_episodes} rollouts.")
@@ -135,6 +145,15 @@ class Experiment:
                 state = next_state
                 step += 1
 
+
+def log_video(imgs, filename, fps=7):
+    height, width = imgs[0].shape[0], imgs[0].shape[1]
+    video = cv2.VideoWriter(f"/home/arovinsky/Desktop/{filename}", cv2.VideoWriter_fourcc(*'XVID'), fps, (width,height))
+
+    for plot_img in plot_imgs:
+        video.write(plot_img)
+
+    video.release()
 
 def main(args):
     rospy.init_node("run_experiment")
@@ -181,6 +200,7 @@ if __name__ == '__main__':
     parser.add_argument('-debug', action='store_true')
     parser.add_argument('-save_agent', action='store_true')
     parser.add_argument('-load_agent', action='store_true')
+    parser.add_argument('-record_video', action='store_true')
 
     # agent
     parser.add_argument('-ensemble_size', type=int, default=1)
