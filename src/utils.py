@@ -59,10 +59,8 @@ def build_action_msg(action, duration, robot_ids):
     multi_action_msg = MultiRobotCmd()
     multi_action_msg.robot_commands = []
 
-    try:
-        action_list = np.split(action, len(action) / 2.)
-    except:
-        import pdb;pdb.set_trace()
+    action = np.clip(action, -1, 1)
+    action_list = np.split(action, len(action) / 2.)
 
     for action, id in zip(action_list, robot_ids):
         action_msg = RobotCmd()
@@ -210,22 +208,22 @@ class DataUtils:
     def cost_dict(self, state, action, goals, robot_goals=False, signed=False):
         state_dim = 3
         if self.use_object:
-            robot_state = state[:, :, :, :state_dim]
-            object_state = state[:, :, :, -state_dim:]
+            robot_state = state[..., :state_dim]
+            object_state = state[..., -state_dim:]
 
             effective_state = robot_state if robot_goals else object_state
         else:
-            effective_state = state[:, :, :, :state_dim]
+            effective_state = state[..., :state_dim]
 
         # distance to goal position
-        state_to_goal_xy = (goals - effective_state)[:, :, :, :-1]
+        state_to_goal_xy = (goals - effective_state)[..., :-1]
         dist_cost = np.linalg.norm(state_to_goal_xy, axis=-1)
         if signed:
             dist_cost *= forward
 
         # difference between current and goal heading
-        current_angle = effective_state[:, :, :, 2]
-        target_angle = np.arctan2(state_to_goal_xy[:, :, :, 1], state_to_goal_xy[:, :, :, 0])
+        current_angle = effective_state[..., 2]
+        target_angle = np.arctan2(state_to_goal_xy[..., 1], state_to_goal_xy[..., 0])
         heading_cost = signed_angle_difference(target_angle, current_angle)
 
         left = (heading_cost > 0) * 2 - 1
@@ -241,14 +239,14 @@ class DataUtils:
 
         # object-robot separation distance
         if self.use_object:
-            object_to_robot_xy = (robot_state - object_state)[:, :, :, :-1]
+            object_to_robot_xy = (robot_state - object_state)[..., :-1]
             sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
         else:
             sep_cost = np.array([0.])
 
         # object-robot heading difference
         if self.use_object:
-            robot_theta, object_theta = robot_state[:, :, :, -1], object_state[:, :, :, -1]
+            robot_theta, object_theta = robot_state[..., -1], object_state[..., -1]
             heading_diff = (robot_theta - object_theta) % (2 * np.pi)
             heading_diff_cost = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
         else:

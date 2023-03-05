@@ -54,24 +54,24 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
     print("\nACTUAL MEAN:", diffs.mean(axis=0))
     print("ACTUAL STD:", diffs.std(axis=0))
 
-    fig, axes = plt.subplots(1, 4)
-    axes[0].plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
-    axes[1].plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+    # fig, axes = plt.subplots(1, 4)
+    # axes[0].plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
+    # axes[1].plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
 
-    axes[0].set_yscale('log')
-    axes[1].set_yscale('log')
+    # axes[0].set_yscale('log')
+    # axes[1].set_yscale('log')
 
-    axes[0].set_title('Training Loss')
-    axes[1].set_title('Test Loss')
+    # axes[0].set_title('Training Loss')
+    # axes[1].set_title('Test Loss')
 
-    for ax in axes:
-        ax.grid()
+    # for ax in axes:
+    #     ax.grid()
 
-    axes[0].set_ylabel('Loss')
-    axes[1].set_xlabel('Epoch')
-    fig.set_size_inches(15, 5)
+    # axes[0].set_ylabel('Loss')
+    # axes[1].set_xlabel('Epoch')
+    # fig.set_size_inches(15, 5)
 
-    plt.show()
+    # plt.show()
 
 def train(agent, train_state, train_action, train_next_state, validation_buffer, epochs=5, batch_size=256, set_scalers=False, meta=False):
     train_state, train_action, train_next_state = as_tensor(train_state, train_action, train_next_state)

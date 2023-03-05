@@ -19,8 +19,8 @@ class DataCollector:
         params["robot_goals"] = False
 
         # states
-        self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, None)
-        self.replay_buffer = ReplayBuffer(params)
+        self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, precollecting=True)
+        self.replay_buffer = ReplayBuffer(params, random=self.random_data, precollecting=True)
 
         action_range = np.linspace(-1, 1, np.floor(np.sqrt(self.n_samples)).astype("int"))
         left_actions, right_actions = np.meshgrid(action_range, action_range)
@@ -41,7 +41,11 @@ class DataCollector:
 
             while not valid:
                 if self.random_data:
-                    action = np.random.uniform(low=-1., high=1., size=2*self.n_robots)
+                    if self.beta:
+                        beta_param = 0.7
+                        action = np.random.beta(beta_param, beta_param, size=2*self.n_robots) * 2 - 1
+                    else:
+                        action = np.random.uniform(low=-1., high=1., size=2*self.n_robots)
                 else:
                     action = self.fixed_actions[i]
 
@@ -83,10 +87,12 @@ if __name__ == "__main__":
     parser.add_argument('-object_id', type=int, default=3)
     parser.add_argument("-n_samples", type=int, default=20)
     parser.add_argument("-buffer_capacity", type=int, default=10000)
+    parser.add_argument('-exp_name', type=str, default=None)
 
     parser.add_argument("-use_object", action='store_true')
     parser.add_argument("-debug", action='store_true')
     parser.add_argument("-random_data", action='store_true')
+    parser.add_argument("-beta", action='store_true')
 
     args = parser.parse_args()
     main(args)

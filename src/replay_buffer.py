@@ -12,7 +12,7 @@ ACTION_DIM = 2
 
 class ReplayBuffer:
     # def __init__(self, capacity=10000, state_dim=3, action_dim=2):
-    def __init__(self, params):
+    def __init__(self, params, random=False, precollecting=False):
         self.params = params
 
         state_dim = STATE_DIM * (self.n_robots + self.use_object)
@@ -26,10 +26,26 @@ class ReplayBuffer:
         self.full = False
         self.idx = 0
 
-        now = datetime.now()
-        date_time = now.strftime("%d_%m_%Y_%H_%M_%S")
-        self.save_dir = os.path.expanduser("~/kamigami_data/buffers/")
-        self.save_path = self.save_dir + f"replay{date_time}.npz"
+        if self.exp_name is None:
+            now = datetime.now()
+            self.exp_name = now.strftime("%d_%m_%Y_%H_%M_%S")
+
+        if precollecting:
+            self.restore_dir = None
+
+            if random:
+                self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/random_buffers/")
+            else:
+                self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/meshgrid_buffers/")
+        else:
+            self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/online_buffers/")
+
+            if random:
+                self.restore_dir = os.path.expanduser("~/kamigami_data/replay_buffers/random_buffers/")
+            else:
+                self.restore_dir = os.path.expanduser("~/kamigami_data/replay_buffers/meshgrid_buffers/")
+
+        self.save_path = self.save_dir + f"{self.exp_name}.npz"
 
     def __getattr__(self, key):
         return self.params[key]
@@ -82,10 +98,12 @@ class ReplayBuffer:
     def restore(self, restore_path=None):
         if restore_path is None:
             # get latest file in save directory
-            list_of_files = glob(self.save_dir + "*.npz")
-            restore_path = max(list_of_files, key=os.path.getctime)
+            list_of_files = glob(self.restore_dir + "*.npz")
+            self.restore_path = max(list_of_files, key=os.path.getctime)
+        else:
+            self.restore_path = restore_path
 
-        data = np.load(restore_path)
+        data = np.load(self.restore_path)
         n_samples = len(data["states"])
 
         for i in range(n_samples):

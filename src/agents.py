@@ -40,11 +40,13 @@ class MPCAgent:
 
         self.trained = False
 
-        now = datetime.now()
-        date_time = now.strftime("%d_%m_%Y_%H_%M_%S")
+        if self.exp_name is None:
+            now = datetime.now()
+            self.exp_name = now.strftime("%d_%m_%Y_%H_%M_%S")
+
         self.save_dir = os.path.expanduser(f"~/kamigami_data/agents/")
 
-        self.state_dict_save_dir = self.save_dir + date_time + "/"
+        self.state_dict_save_dir = self.save_dir + self.exp_name + "/"
         self.save_paths = [self.state_dict_save_dir + f"state_dict{i}.npz" for i in range(self.ensemble_size)]
 
     def __getattr__(self, key):
@@ -79,7 +81,7 @@ class MPCAgent:
         # discount costs through time
         # discount = (1 - 1 / (4 * self.mpc_horizon)) ** np.arange(self.mpc_horizon)
 
-        discount = 0.8 ** np.arange(self.mpc_horizon)
+        discount = 0.9 ** np.arange(self.mpc_horizon)
         ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
@@ -90,7 +92,8 @@ class MPCAgent:
         return total_costs
 
     def dump(self):
-        os.makedirs(self.state_dict_save_dir)
+        if not os.path.exists(self.state_dict_save_dir):
+            os.makedirs(self.state_dict_save_dir)
 
         for model, path in zip(self.models, self.save_paths):
             torch.save(model.state_dict(), path)
@@ -143,6 +146,7 @@ class CEMAgent(MPCAgent):
             if i > 0:
                 sampled_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(self.mpc_samples, action_trajectory_dim))
                 sampled_actions = sampled_actions.reshape(self.mpc_samples, self.mpc_horizon, self.action_dim)
+                sampled_actions = np.clip(sampled_actions, -1, 1)
 
             predicted_state_sequence = self.simulate(initial_state, sampled_actions)
             total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals)
@@ -205,3 +209,83 @@ class MPPIAgent(MPCAgent):
         #     import pdb;pdb.set_trace()
 
         return best_action, predicted_next_state
+
+
+class DifferentialDriveAgent:
+    def __init__(self, params):
+        self.params = params
+        self.dtu = DataUtils(params)
+
+    def __getattr__(self, key):
+        return self.params[key]
+
+    def get_action(self, state, goals):
+        goal = goals[0]
+        xy_vector_to_goal = (goal - state)[:2]
+        xy_vector_to_goal_angle = np.arctan2(xy_vector_to_goal[1], xy_vector_to_goal[0])
+
+        angle_diff_side = (xy_vector_to_goal_angle - state[2]) % (2 * np.pi)
+        angle_diff_dir = np.stack((angle_diff_side, 2 * np.pi - angle_diff_side)).min(axis=0)
+
+        left = (angle_diff_side < np.pi)
+        forward = (angle_diff_dir > np.pi / 2)
+
+        left = left * 2 - 1
+        forward = forward * 2 - 1
+
+        heading_cost = angle_diff_dir
+        heading_cost *= left * forward
+
+        dist_cost = np.linalg.norm(xy_vector_to_goal)
+        dist_cost *= forward
+
+        ctrl_array = np.array([[0.5, 0.5], [0.5, -0.5]])
+        error_array = np.array([dist_cost * 3., heading_cost * 0.17]) * 9
+
+        action = ctrl_array @ error_array
+        action /= max(1, max(abs(action)))
+
+        return action, np.zeros(3)
+
+
+        # our best attempt at no-ribbon
+                # if t == 0:
+                #     object_state_temp = initial_state[..., -3:]
+                #     new_state = initial_state.copy()
+
+                #     new_state[..., :3] = object_state_temp
+                #     new_state[..., 3:] = initial_state[..., :-3]
+                # else:
+                #     object_state_temp = pred_state_sequence[i, :, t-1, -3:].copy()
+                #     new_state = pred_state_sequence[i, :, t-1].copy()
+
+                #     new_state[..., :3] = object_state_temp
+                #     new_state[..., 3:] = pred_state_sequence[i, :, t-1, :-3]
+
+                # new_state_relative = self.dtu.state_to_model_input(new_state).numpy()
+                # robot0_relative_xy = new_state_relative[..., :2]
+                # robot1_relative_xy = new_state_relative[..., 4:6]
+
+                # robot0_norm = np.linalg.norm(robot0_relative_xy, axis=-1)
+                # robot1_norm = np.linalg.norm(robot1_relative_xy, axis=-1)
+
+                # limit = 0.25
+
+                # robot0_norm[robot0_norm > limit] = limit
+                # robot1_norm[robot1_norm > limit] = limit
+
+                # robot0_norm = robot0_norm[:, None]
+                # robot1_norm = robot1_norm[:, None]
+
+                # robot0_relative_xy = robot0_relative_xy / np.linalg.norm(robot0_relative_xy, axis=-1, keepdims=True) * robot0_norm
+                # robot1_relative_xy = robot1_relative_xy / np.linalg.norm(robot1_relative_xy, axis=-1, keepdims=True) * robot1_norm
+
+                # robot0_xy = object_state_temp[..., :2] + robot0_relative_xy
+                # robot1_xy = object_state_temp[..., :2] + robot1_relative_xy
+
+                # if t == 0:
+                #     initial_state[..., :2] = robot0_xy
+                #     initial_state[..., 3:5] = robot1_xy
+                # else:
+                #     pred_state_sequence[i, :, t, :2] = robot0_xy
+                #     pred_state_sequence[i, :, t, 3:5] = robot1_xy

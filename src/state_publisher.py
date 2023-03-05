@@ -102,6 +102,7 @@ class StatePublisher:
 
     def compute_vel_from_past_states(self):
         velocities = {}
+        eps = 0.00001
         for id in [self.object_id, *self.robot_ids]:
             past_states = self.id_to_past_states_stamped[id]
             v1 = past_states[0] - past_states[1]
@@ -112,8 +113,8 @@ class StatePublisher:
             v2[2] = (v2[2] + np.pi) % (2 * np.pi) - np.pi
 
             # divide by time delta to get velocity
-            v1 = v1[:-1] / v1[-1]
-            v2 = v2[:-1] / v2[-1]
+            v1 = v1[:-1] / (v1[-1] + eps)
+            v2 = v2[:-1] / (v2[-1] + eps)
             velocities[id] = ((v1 + v2) / 2)
 
         return velocities
