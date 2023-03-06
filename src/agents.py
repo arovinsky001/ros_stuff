@@ -78,10 +78,7 @@ class MPCAgent:
         for cost_type in cost_dict:
             ensemble_costs += cost_dict[cost_type] * self.cost_weights_dict[cost_type]
 
-        # discount costs through time
-        # discount = (1 - 1 / (4 * self.mpc_horizon)) ** np.arange(self.mpc_horizon)
-
-        discount = 0.9 ** np.arange(self.mpc_horizon)
+        discount = self.discount_factor ** np.arange(self.mpc_horizon)
         ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
@@ -204,9 +201,6 @@ class MPPIAgent(MPCAgent):
 
         best_action = self.trajectory_mean[:self.action_dim]
         predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
-
-        # if np.linalg.norm(best_action) < np.sqrt(2) * 0.5:
-        #     import pdb;pdb.set_trace()
 
         return best_action, predicted_next_state
 

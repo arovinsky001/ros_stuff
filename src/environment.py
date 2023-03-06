@@ -2,8 +2,6 @@
 
 import os
 import numpy as np
-# import gym
-# from gym import register
 
 import rospy
 from sensor_msgs.msg import Image
@@ -34,13 +32,11 @@ class Environment:
         self.action_receipt_dict = action_receipt_dict
 
         self.episode_states = []
+        self.camera_imgs = []
 
         self.cv_bridge = CvBridge()
         self.action_publisher = rospy.Publisher("/action_topic", MultiRobotCmd, queue_size=1)
         self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1)
-
-        self.camera_imgs = []
-        self.i = 0
 
         if not calibrate and not precollecting:
             rospy.sleep(0.5)        # wait for states to be published and set
@@ -74,10 +70,8 @@ class Environment:
         cv_img = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
         self.current_image = cv_img
 
-        if self.i % 1 == 0:
+        if self.save_real_video:
             self.camera_imgs.append(cv_img)
-
-        self.i += 1
 
     def step(self, action, reset=False):
         action_msg = build_action_msg(action, self.action_duration, self.robot_ids)
@@ -153,10 +147,6 @@ class Environment:
         return state
 
     def render(self, done=False, episode=0):
-        # get current state
-        # make plot based on relevant states and goals (track self.states or something)
-        # get real camera image from a ros subscriber
-
         real_img = self.current_image.copy()
 
         states = np.array(self.episode_states)
@@ -168,20 +158,20 @@ class Environment:
         linewidth = 0.7
 
         ax.plot(goal_states[:, 0], goal_states[:, 1], color="green", linewidth=linewidth, marker="*", label="Goal Trajectory")
-        if done:
+        if self.save_states and done:
             np.save(f"/home/arovinsky/mar1_dump/goal_states_ep{episode}.npy", goal_states)
 
         colors = ["blue", "purple", "orange"]
         for i, (id, robot_states) in enumerate(robot_states_dict.items()):
             ax.plot(robot_states[:, 0], robot_states[:, 1], color=colors[i], linewidth=linewidth,
                     marker=">", markersize=5, label=f"Robot{id} Trajectory")
-            if done:
+            if self.save_states and done:
                 np.save(f"/home/arovinsky/mar1_dump/robot_states_{id}_ep{episode}.npy", robot_states)
 
         if self.use_object:
             ax.plot(object_states[:, 0], object_states[:, 1], color="red", linewidth=linewidth,
                     marker=".", markersize=9, label="Object Trajectory")
-            if done:
+            if self.save_states and done:
                 np.save(f"/home/arovinsky/mar1_dump/object_states_ep{episode}.npy", object_states)
 
         ax.axis('equal')
@@ -242,6 +232,3 @@ class Environment:
         goals = self.goals[start_step:end_step]
 
         return goals
-
-
-# register("kamigami-hardware-v0", Environment)

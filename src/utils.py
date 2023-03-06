@@ -264,33 +264,3 @@ class DataUtils:
         }
 
         return cost_dict
-
-    # def prediction_error_dict(self, state, next_state, predicted_next_state):
-    #     distance_travelled = np.linalg.norm((next_state - state)[:2])
-    #     heading_travelled = signed_angle_difference(next_state[2], state[2])
-
-    #     distance_error = np.linalg.norm((next_state - predicted_next_state)[:2])
-    #     heading_error = signed_angle_difference(next_state[2], predicted_next_state[2])
-
-    #     robot_prediction_error = np.array([
-    #         distance_error,
-    #         distance_error / (distance_travelled + 1e-8),
-    #         heading_error,
-    #         np.abs(heading_error / (heading_travelled + 1e-8)),
-    #     ])
-    #     print("\nROBOT PREDICTION ERROR (distance, distance normalized, heading, heading_normalized):", robot_prediction_error)
-    #     self.logger.log_model_errors(robot_prediction_error, object=False)
-
-    #     if self.use_object:
-    #         distance_travelled = np.linalg.norm((next_state - state)[3:5])
-    #         heading_travelled = signed_angle_difference(next_state[5], state[5])
-    #         distance_error = np.linalg.norm((next_state - self.predicted_next_state)[3:5])
-    #         heading_error = signed_angle_difference(next_state[5], self.predicted_next_state[5])
-    #         object_prediction_error = np.array([
-    #             distance_error,
-    #             distance_error / distance_travelled,
-    #             heading_error,
-    #             np.abs(heading_error / heading_travelled),
-    #         ])
-    #         print("OBJECT PREDICTION ERROR (distance, distance normalized, heading):", object_prediction_error, "\n")
-    #         self.logger.log_model_errors(object_prediction_error, object=True)
