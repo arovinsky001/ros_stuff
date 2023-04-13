@@ -11,8 +11,7 @@ ACTION_DIM = 2
 
 
 class ReplayBuffer:
-    # def __init__(self, capacity=10000, state_dim=3, action_dim=2):
-    def __init__(self, params, random=False, precollecting=False):
+    def __init__(self, params, precollecting=False, save_dir=None):
         self.params = params
 
         state_dim = STATE_DIM * (self.n_robots + self.use_object)
@@ -30,21 +29,8 @@ class ReplayBuffer:
             now = datetime.now()
             self.exp_name = now.strftime("%d_%m_%Y_%H_%M_%S")
 
-        if precollecting:
-            self.restore_dir = None
-
-            if random:
-                self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/random_buffers/")
-            else:
-                self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/meshgrid_buffers/")
-        else:
-            self.save_dir = os.path.expanduser("~/kamigami_data/replay_buffers/online_buffers/")
-
-            if random:
-                self.restore_dir = os.path.expanduser("~/kamigami_data/replay_buffers/random_buffers/")
-            else:
-                self.restore_dir = os.path.expanduser("~/kamigami_data/replay_buffers/meshgrid_buffers/")
-
+        self.save_dir = os.path.expanduser(self.buffer_save_dir)
+        self.restore_dir = os.path.expanduser(self.buffer_restore_dir) if not precollecting else None
         self.save_path = self.save_dir + f"{self.exp_name}.npz"
 
     def __getattr__(self, key):
@@ -95,11 +81,12 @@ class ReplayBuffer:
                             next_states=self.next_states[:self.size],
                             idx=self.idx)
 
-    def restore(self, restore_path=None):
+    def restore(self, restore_path=None, recency=1):
         if restore_path is None:
             # get latest file in save directory
             list_of_files = glob(self.restore_dir + "*.npz")
-            self.restore_path = max(list_of_files, key=os.path.getctime)
+            files_sorted_recency = sorted(list_of_files, key=os.path.getctime)
+            self.restore_path = files_sorted_recency[-recency]
         else:
             self.restore_path = restore_path
 

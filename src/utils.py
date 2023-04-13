@@ -221,7 +221,7 @@ class DataUtils:
         if signed:
             dist_cost *= forward
 
-        # difference between current and goal heading
+        # difference between current and toward-goal heading
         current_angle = effective_state[..., 2]
         target_angle = np.arctan2(state_to_goal_xy[..., 1], state_to_goal_xy[..., 0])
         heading_cost = signed_angle_difference(target_angle, current_angle)
@@ -236,6 +236,21 @@ class DataUtils:
             heading_cost *= left * forward
         else:
             heading_cost = np.abs(heading_cost)
+
+        # difference between current and specified heading
+        target_angle = goals[..., 2]
+        target_heading_cost = signed_angle_difference(target_angle, current_angle)
+
+        left = (target_heading_cost > 0) * 2 - 1
+        forward = (np.abs(target_heading_cost) < np.pi / 2) * 2 - 1
+
+        target_heading_cost[forward == -1] = (target_heading_cost[forward == -1] + np.pi) % (2 * np.pi)
+        target_heading_cost = np.stack((target_heading_cost, 2 * np.pi - target_heading_cost)).min(axis=0)
+
+        if signed:
+            target_heading_cost *= left * forward
+        else:
+            target_heading_cost = np.abs(target_heading_cost)
 
         # object-robot separation distance
         if self.use_object:
@@ -258,6 +273,7 @@ class DataUtils:
         cost_dict = {
             "distance": dist_cost,
             "heading": heading_cost,
+            "target_heading": target_heading_cost,
             "separation": sep_cost,
             "heading_difference": heading_diff_cost,
             "action_norm": norm_cost,

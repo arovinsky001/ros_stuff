@@ -17,10 +17,11 @@ class DataCollector:
         params["robot_ids"].sort()
         params["n_robots"] = len(self.robot_ids)
         params["robot_goals"] = False
+        params["buffer_save_dir"] = f"~/kamigami_data/replay_buffers/{'random_buffers' if self.random_data else 'meshgrid_buffers'}/"
 
         # states
         self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, precollecting=True)
-        self.replay_buffer = ReplayBuffer(params, random=self.random_data, precollecting=True)
+        self.replay_buffer = ReplayBuffer(params, precollecting=True)
 
         action_range = np.linspace(-1, 1, np.floor(np.sqrt(self.n_samples)).astype("int"))
         left_actions, right_actions = np.meshgrid(action_range, action_range)

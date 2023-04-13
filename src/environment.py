@@ -192,21 +192,15 @@ class Environment:
         return plot_img, real_img
 
     def get_state(self):
-        robot_pos_dict = self.robot_pos_dict.copy()
-        object_pos = self.object_pos.copy()
-        corner_pos = self.corner_pos.copy()
-
         states = []
 
-        for id, robot_pos in robot_pos_dict.items():
-            robot_pos[2] = (robot_pos[2] + self.yaw_offsets[id]) % (2 * np.pi)
-            states.append(robot_pos)
+        for id in self.robot_pos_dict:
+            states.append(self.get_state_from_id[id])
 
         if self.use_object:
-            object_pos[2] = (object_pos[2] + self.yaw_offsets[self.object_id]) % (2 * np.pi)
-            states.append(object_pos)
+            states.append(self.get_state_from_id[self.object_id])
 
-        out_of_bounds = lambda pos: np.any(pos[:2] > corner_pos[:2]) or np.any(pos[:2] < 0)
+        out_of_bounds = lambda pos: np.any(pos[:2] > self.corner_pos[:2]) or np.any(pos[:2] < 0)
 
         valid = True
         for state in states:
@@ -220,6 +214,15 @@ class Environment:
             state = np.concatenate(states, axis=0)
 
         return state
+
+    def get_state_from_id(self, id):
+        if id == self.object_id:
+            pos = self.object_pos.copy()
+        else:
+            pos = self.robot_pos_dict[id].copy()
+
+        pos[2] = (pos[2] + self.yaw_offsets[id]) % (2 * np.pi)
+        return pos
 
     def get_next_n_goals(self, n, episode_step=None):
         if episode_step is None:

@@ -24,6 +24,7 @@ class MPCAgent:
         self.cost_weights_dict = {
             "distance": 1.,
             "heading": 0.,
+            "target_heading": 0.2,
             "action_norm": 0.,
             "distance_bonus": 0.,
             "separation": 0.,
@@ -95,11 +96,12 @@ class MPCAgent:
         for model, path in zip(self.models, self.save_paths):
             torch.save(model.state_dict(), path)
 
-    def restore(self, restore_dir=None):
+    def restore(self, restore_dir=None, recency=1):
         if restore_dir is None:
             # get latest subdir in save directory (state_dicts saved in subdir)
             all_subdirs = [os.path.join(self.save_dir, d) for d in os.listdir(self.save_dir) if os.path.isdir(os.path.join(self.save_dir, d))]
-            restore_dir = max(all_subdirs, key=os.path.getctime)
+            subdirs_sorted_recency = sorted(all_subdirs, key=os.path.getctime)
+            restore_dir = subdirs_sorted_recency[-recency]
 
         sort_fn = lambda path: int(path.split(".")[0][-1])
         restore_paths = [os.path.join(restore_dir, f) for f in os.listdir(restore_dir)]

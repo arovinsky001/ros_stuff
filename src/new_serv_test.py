@@ -17,7 +17,6 @@ MOTOR_LEFT_PWM = 13 # PWMA - 33, GPIO 13
 MOTOR_LEFT_FW = 22 # AIN2 - 15, GPIO 22
 MOTOR_LEFT_BW = 27 # AIN1 - 13, GPIO 27
 
-ac_num = -1
 def kami_callback(msg):
     print("Message received at time:", rospy.get_rostime())
 
