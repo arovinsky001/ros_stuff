@@ -24,7 +24,7 @@ class MPCAgent:
         self.cost_weights_dict = {
             "distance": 1.,
             "heading": 0.,
-            "target_heading": 0.2,
+            "target_heading": 0.,
             "action_norm": 0.,
             "distance_bonus": 0.,
             "separation": 0.,

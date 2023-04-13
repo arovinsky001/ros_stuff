@@ -88,7 +88,7 @@ class ReplayBuffer:
             files_sorted_recency = sorted(list_of_files, key=os.path.getctime)
             self.restore_path = files_sorted_recency[-recency]
         else:
-            self.restore_path = restore_path
+            self.restore_path = os.path.expanduser(restore_path)
 
         data = np.load(self.restore_path)
         n_samples = len(data["states"])

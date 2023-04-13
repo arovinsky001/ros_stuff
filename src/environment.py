@@ -17,7 +17,7 @@ class Environment:
     def __init__(self, robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params, calibrate=False, precollecting=False):
         self.params = params
 
-        self.post_action_sleep_time = 0.4
+        self.post_action_sleep_time = 0.5
         self.action_duration = 0.4 if self.use_object else 0.3
 
         self.episode_step = 0
@@ -36,9 +36,9 @@ class Environment:
 
         self.cv_bridge = CvBridge()
         self.action_publisher = rospy.Publisher("/action_topic", MultiRobotCmd, queue_size=1)
-        self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1)
 
         if not calibrate and not precollecting:
+            self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1)
             rospy.sleep(0.5)        # wait for states to be published and set
 
             if self.trajectory == "S":
@@ -195,10 +195,10 @@ class Environment:
         states = []
 
         for id in self.robot_pos_dict:
-            states.append(self.get_state_from_id[id])
+            states.append(self.get_state_from_id(id))
 
         if self.use_object:
-            states.append(self.get_state_from_id[self.object_id])
+            states.append(self.get_state_from_id(self.object_id))
 
         out_of_bounds = lambda pos: np.any(pos[:2] > self.corner_pos[:2]) or np.any(pos[:2] < 0)
 

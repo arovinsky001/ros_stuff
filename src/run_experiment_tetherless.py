@@ -28,9 +28,12 @@ class Experiment:
         params["n_robots"] = len(self.robot_ids)
         params["robot_ids"].sort()
 
+        params["hidden_depth"] = 4
+
         far_params = params.copy()
         far_params["n_robots"] = 1
         far_params["use_object"] = False
+        far_params["robot_goals"] = True
 
         if self.mpc_method == 'mppi':
             self.agent_class = MPPIAgent
@@ -46,14 +49,24 @@ class Experiment:
         self.close_agent = self.agent_class(params)
         self.close_replay_buffer = ReplayBuffer(params)
 
+        if self.pretrain_close_agent:
+            self.close_replay_buffer.restore(restore_path=self.close_buffer_restore_path)
+            print("\n\nCLOSE BUFFER SIZE:", self.close_replay_buffer.size, "\n")
+            train_from_buffer(
+                self.close_agent, self.close_replay_buffer, validation_buffer=None,
+                pretrain_samples=self.buffer_train_capacity, save_agent=self.save_agent,
+                train_epochs=self.train_epochs, batch_size=self.batch_size,
+                meta=self.meta,
+            )
+
         # train or restore single-robot agents (far from object)
         self.far_agents = [self.agent_class(far_params) for _ in range(self.n_robots)]
-        for i, agent in self.far_agents:
+        for i, agent in enumerate(self.far_agents):
             if self.load_agent:
                 agent.restore(recency=self.n_robots-i)
             else:
                 replay_buffer = ReplayBuffer(far_params)
-                replay_buffer.restore(restore_dir=self.restore_dir, recency=self.n_robots-i)
+                replay_buffer.restore(recency=self.n_robots-i)
 
                 print(f"\n\nTRAINING AGENT {self.robot_ids[i]}\n")
                 train_from_buffer(
@@ -75,8 +88,8 @@ class Experiment:
         self.params_pkl_dir = os.path.expanduser(f"~/kamigami_data/params_pkls/")
 
         dirs = [
-            self.model_error_dir,
-            self.distance_cost_dir,
+            # self.model_error_dir,
+            # self.distance_cost_dir,
             self.plot_video_dir,
             self.real_video_dir,
             self.params_pkl_dir,
@@ -99,8 +112,8 @@ class Experiment:
                 random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
                 self.env.step(random_max_action)
 
-        state = self.env.reset(self.agent, self.replay_buffer)
-        # state = self.env.get_state()
+        # state = self.env.reset(self.agent, self.replay_buffer)
+        state = self.env.get_state()
         done = False
         episode = 0
 
@@ -114,30 +127,59 @@ class Experiment:
             print(f"\nEPISODE STEP:", self.env.episode_step)
             t = rospy.get_time()
 
-            robots_close_to_object = self.robots_close_to_object(state)
-            if robots_close_to_object:
-                goals = self.env.get_next_n_goals(self.mpc_horizon)
-                action, predicted_next_state = self.close_agent.get_action(state, goals)
+            if state is None:
+                state = self.env.get_state()
+
+            which_robots_close_to_object = self.which_robots_close_to_object(state)
+            close_mode = np.all(which_robots_close_to_object)
+
+            beta_param = 0.7
+            object_goals = self.env.get_next_n_goals(self.mpc_horizon)
+            if close_mode:
+                print("ROBOTS CLOSE TO OBJECT")
+                if self.close_replay_buffer.size < self.buffer_train_capacity:
+                    action = np.random.beta(beta_param, beta_param, size=2*self.n_robots) * 2 - 1
+                else:
+                    action, predicted_next_state = self.close_agent.get_action(state, object_goals)
             else:
-                goals = np.tile(state[-3:], (self.mpc_horizon, 3))
-                action = np.empty(2*self.n_robots)
+                print("ROBOTS FAR FROM OBJECT")
+                goals = np.tile(state[-3:], (self.mpc_horizon, 1))
+
+                # make far robots come to object, close robots take random action
+                action = np.random.beta(beta_param, beta_param, size=2*self.n_robots) * 2 - 1
                 for i, agent in enumerate(self.far_agents):
+                    if which_robots_close_to_object[i]:
+                        continue
+
                     agent_state = state[3*i:3*(i+1)]
                     action[2*i:2*(i+1)], predicted_next_state = agent.get_action(agent_state, goals)
 
             next_state, done = self.env.step(action)
 
-            if robots_close_to_object:
-                if state is not None and next_state is not None:
-                    self.close_replay_buffer.add(state, action, next_state)
+            if state is not None and next_state is not None:
+                self.close_replay_buffer.add(state, action, next_state)
 
-                    # relevant_state = state[:2] if self.robot_goals else state[-3:-1]
+                object_next_state = next_state[-3:-1]
+                print("DISTANCE FROM GOAL:", np.linalg.norm(object_next_state - object_goals[0, :2]))
+                if close_mode:
+                    predicted_object_state = predicted_next_state[-3:-1]
+                    print("PREDICTION ERROR:", np.linalg.norm(predicted_object_state - object_next_state))
+
+            if np.any(which_robots_close_to_object):
                     # relevant_pred = predicted_next_state[:2] if self.robot_goals else predicted_next_state[-3:-1]
                     # relevant_next = next_state[:2] if self.robot_goals else next_state[-3:-1]
-                    # print("DISTANCE FROM GOAL:", np.linalg.norm(relevant_next - goals[0, :2]))
                     # print("PREDICTION ERROR:", np.linalg.norm(relevant_pred - relevant_next))
 
                 # self.buffer_train_capacity
+
+                if self.close_replay_buffer.size == self.buffer_train_capacity:
+                    train_from_buffer(
+                        self.close_agent, self.close_replay_buffer, validation_buffer=None,
+                        pretrain_samples=self.buffer_train_capacity, save_agent=self.save_agent,
+                        train_epochs=self.train_epochs, batch_size=self.batch_size,
+                        meta=self.meta,
+                    )
+
                 if self.update_online:
                     for model in self.close_agent.models:
                         for _ in range(self.utd_ratio):
@@ -199,19 +241,21 @@ class Experiment:
                     random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
                     self.env.step(random_max_action)
 
-                state = self.env.reset(self.agent, self.replay_buffer)
+                # state = self.env.reset(self.agent, self.replay_buffer)
+                self.env.episode_step = 0
+                self.env.reverse_episode = not self.env.reverse_episode
             else:
                 state = next_state
 
-    def robots_close_to_object(self, state):
+    def which_robots_close_to_object(self, state):
         robot_states = state[:3*self.n_robots].reshape(-1, 3)
         object_state = state[-3:]
-        max_dist_from_object = np.linalg.norm((object_state - robot_states)[:, :2], axis=1).max()
-        return max_dist_from_object < self.close_radius
+        dists_from_object = np.linalg.norm((object_state - robot_states)[:, :2], axis=1)
+        return dists_from_object < self.close_radius
 
     def dump(self):
-        self.params["buffer_save_path"] = self.replay_buffer.save_path
-        self.params["buffer_restore_path"] = self.replay_buffer.restore_path
+        # self.params["buffer_save_path"] = self.close_replay_buffer.save_path
+        # self.params["buffer_restore_path"] = self.close_replay_buffer.restore_path
 
         with open(self.params_pkl_dir + f"{self.exp_name}.pkl", "wb") as f:
             pkl.dump(self.params, f)
@@ -240,7 +284,6 @@ if __name__ == '__main__':
 
     parser.add_argument('-mpc_method', type=str, default='mppi')
     parser.add_argument('-trajectory', type=str, default='8')
-    parser.add_argument('-restore_dir', type=str, default=None)
 
     parser.add_argument('-alpha', type=float, default=0.8)
     parser.add_argument('-n_best', type=int, default=30)
@@ -282,7 +325,8 @@ if __name__ == '__main__':
     parser.add_argument('-mpc_horizon', type=int, default=5)
     parser.add_argument('-mpc_samples', type=int, default=200)
     parser.add_argument('-robot_goals', action='store_true')
-    parser.add_argument('-close_radius', type=float, default=0.17)
+    parser.add_argument('-close_radius', type=float, default=0.4)
+    parser.add_argument('-pretrain_close_agent', action='store_true')
 
     # model
     parser.add_argument('-hidden_dim', type=int, default=200)
@@ -297,6 +341,9 @@ if __name__ == '__main__':
     parser.add_argument('-save_freq', type=int, default=50) # TODO implement this
     parser.add_argument('-buffer_capacity', type=int, default=10000)
     parser.add_argument('-buffer_train_capacity', type=int, default=100)
+    parser.add_argument('-buffer_save_dir', type=str, default='~/kamigami_data/replay_buffers/online_buffers/')
+    parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/meshgrid_buffers/')
+    parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless.npz')
 
     args = parser.parse_args()
     main(args)

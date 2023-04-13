@@ -89,8 +89,9 @@ def make_state_subscriber(robot_ids):
         robot_states, os, cs = msg.robot_states, msg.object_state, msg.corner_state
 
         for rs in robot_states:
-            robot_pos_dict[rs.robot_id][:] = np.array([rs.x, rs.y, rs.yaw])
-            robot_vel_dict[rs.robot_id][:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
+            if rs.robot_id in robot_pos_dict:
+                robot_pos_dict[rs.robot_id][:] = np.array([rs.x, rs.y, rs.yaw])
+                robot_vel_dict[rs.robot_id][:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
 
         object_pos[:] = np.array([os.x, os.y, os.yaw])
         object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
@@ -135,9 +136,11 @@ class DataUtils:
 
         n_states = self.n_robots + self.use_object
         relative_states = torch.empty((state.size(0), 4*(n_states-1)))
-        base_xy, base_heading = state[:, :2], state[:, 2]
 
-        for i in range(1, n_states):
+        # use object state as base state
+        base_xy, base_heading = state[:, -3:-1], state[:, -1]
+
+        for i in range(0, n_states-1):
             cur_state = state[:, 3*i:3*(i+1)]
             xy, heading = cur_state[:, :2], cur_state[:, 2]
 
@@ -148,7 +151,7 @@ class DataUtils:
             relative_state_sc = torch.stack(sin_cos(relative_state_heading), dim=1)
 
             relative_state = torch.cat((relative_state_to_base_xy, relative_state_sc), dim=1)
-            relative_states[:, 4*(i-1):4*i] = relative_state
+            relative_states[:, 4*i:4*(i+1)] = relative_state
 
         return relative_states
 
@@ -157,7 +160,7 @@ class DataUtils:
 
         n_states = self.n_robots + self.use_object
         relative_delta_xysc = torch.empty((state.size(0), 4*n_states))
-        base_heading = state[:, 2]
+        base_heading = state[:, -1]
 
         for i in range(n_states):
             cur_state, cur_next_state = state[:, 3*i:3*(i+1)], next_state[:, 3*i:3*(i+1)]
@@ -183,7 +186,7 @@ class DataUtils:
 
         n_states = self.n_robots + self.use_object
         next_state = torch.empty_like(state)
-        base_heading = state[:, 2]
+        base_heading = state[:, -1]
 
         for i in range(n_states):
             cur_state, cur_relative_delta = state[:, 3*i:3*(i+1)], relative_delta[:, 4*i:4*(i+1)]
@@ -254,8 +257,10 @@ class DataUtils:
 
         # object-robot separation distance
         if self.use_object:
-            object_to_robot_xy = (robot_state - object_state)[..., :-1]
-            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1)
+            robot_states = state[..., :self.n_robots*state_dim].reshape(*state.shape[:-1], self.n_robots, state_dim)
+            robot_states = robot_states.transpose(3, 0, 1, 2, 4)
+            object_to_robot_xy = (object_state - robot_states)[..., :-1]
+            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1).sum(axis=0)
         else:
             sep_cost = np.array([0.])
 
