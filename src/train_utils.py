@@ -18,6 +18,24 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
     actions = replay_buffer.actions[:n_samples]
     next_states = replay_buffer.next_states[:n_samples]
 
+    ###
+    states = np.tile(states, (2, 1))
+    actions = np.tile(actions, (2, 1))
+    next_states = np.tile(next_states, (2, 1))
+
+    tmp = states[n_samples:, :2].copy()
+    states[n_samples:, :2] = states[n_samples:, 3:5].copy()
+    states[n_samples:, 3:5] = tmp
+
+    tmp = actions[n_samples:, :2].copy()
+    states[n_samples:, :2] = states[n_samples:, 2:].copy()
+    states[n_samples:, 2:] = tmp
+
+    tmp = next_states[n_samples:, :2].copy()
+    next_states[n_samples:, :2] = next_states[n_samples:, 3:5].copy()
+    next_states[n_samples:, 3:5] = tmp
+    ###
+
     if validation_buffer is None:
         validation_buffer = replay_buffer
 
