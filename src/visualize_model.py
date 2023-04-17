@@ -85,7 +85,7 @@ def quiver_plot_states(states, color, labels=[None]*3):
     plt.quiver(states[:, 0], states[:, 1], np.cos(states[:, 2]), np.sin(states[:, 2]), color=color)
 
     markers = ['.', 'v', '*']
-    for state, marker, label in zip(states, markers, label):
+    for state, marker, label in zip(states, markers, labels):
         plt.plot(state[0], state[1], marker=marker, color=color, label=label)
 
 if __name__ == '__main__':
@@ -95,11 +95,25 @@ if __name__ == '__main__':
     parser.add_argument('-object_id', type=int, default=3)
 
     parser.add_argument('-ensemble_size', type=int, default=1)
-    parser.add_argument('-batch_size', type=int, default=10000)
+    parser.add_argument('-buffer_save_dir', type=str, default='~/kamigami_data/replay_buffers/online_buffers/')
+    parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/meshgrid_buffers/')
+    parser.add_argument('-hidden_dim', type=int, default=200)
+    parser.add_argument('-hidden_depth', type=int, default=3)
+    parser.add_argument('-lr', type=float, default=0.001)
+    parser.add_argument('-std', type=bool, default=0.02)
+
 
     args = parser.parse_args()
+    args.n_robots = 2
+    args.use_object = True
+    args.buffer_capacity = 50000
+    args.exp_name = "visualize_model"
+    args.robot_goals = False
+    args.scale = True
+    args.dist = True
     params = vars(args)
 
+    rospy.init_node('visualize_model')
     robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, tf_buffer, tf_listener = make_state_subscriber(args.robot_ids)
     env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params)
 
@@ -130,5 +144,11 @@ if __name__ == '__main__':
         quiver_plot_states(plot_pred_next_states, 'blue')
         quiver_plot_states(plot_next_states, 'green')
 
+        plt.xlim([0, 2.3])
+        plt.ylim([0, 1.7])
         plt.legend()
         plt.show()
+
+"""
+0.99, 0.99, 0.99, 0.99
+"""
