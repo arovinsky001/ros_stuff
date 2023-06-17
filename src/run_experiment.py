@@ -290,13 +290,13 @@ if __name__ == '__main__':
 
     parser.add_argument('-scale', action='store_true')
     parser.add_argument('-dist', action='store_true')
-    parser.add_argument('-std', type=bool, default=0.01)
+    parser.add_argument('-std', type=float, default=0.01)
 
     # replay buffer
     parser.add_argument('-save_freq', type=int, default=50) # TODO implement this
     parser.add_argument('-buffer_capacity', type=int, default=10000)
     parser.add_argument('-buffer_save_dir', type=str, default='~/kamigami_data/replay_buffers/online_buffers/')
-    parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/meshgrid_buffers/')
+    parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/random_buffers/')
 
     args = parser.parse_args()
     main(args)

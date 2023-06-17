@@ -63,6 +63,8 @@ class Environment:
 
         self.corner_pos_perm = corner_pos
 
+        self.save_states = False
+
     def __getattr__(self, key):
         return self.params[key]
 

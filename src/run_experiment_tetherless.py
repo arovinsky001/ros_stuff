@@ -27,13 +27,13 @@ class Experiment:
         self.params = params
         params["n_robots"] = len(self.robot_ids)
         params["robot_ids"].sort()
-
         params["hidden_depth"] = 4
 
         far_params = params.copy()
         far_params["n_robots"] = 1
         far_params["use_object"] = False
         far_params["robot_goals"] = True
+        far_params["ensemble_size"] = 1
 
         if self.mpc_method == 'mppi':
             self.agent_class = MPPIAgent
@@ -54,9 +54,9 @@ class Experiment:
             print("\n\nCLOSE BUFFER SIZE:", self.close_replay_buffer.size, "\n")
             train_from_buffer(
                 self.close_agent, self.close_replay_buffer, validation_buffer=None,
-                pretrain_samples=self.buffer_train_capacity, save_agent=self.save_agent,
+                pretrain_samples=self.close_replay_buffer.size, save_agent=self.save_agent,
                 train_epochs=self.train_epochs, batch_size=self.batch_size,
-                meta=self.meta,
+                meta=self.meta, close_agent=True,
             )
 
         # train or restore single-robot agents (far from object)
@@ -73,7 +73,7 @@ class Experiment:
                     agent, replay_buffer, validation_buffer=None,
                     pretrain_samples=self.pretrain_samples, save_agent=self.save_agent,
                     train_epochs=self.train_epochs, batch_size=self.batch_size,
-                    meta=self.meta,
+                    meta=self.meta, close_agent=False,
                 )
             agent.cost_weights_dict["target_heading"] = 0.
 
@@ -138,6 +138,7 @@ class Experiment:
             if close_mode:
                 print("ROBOTS CLOSE TO OBJECT")
                 if self.close_replay_buffer.size < self.buffer_train_capacity:
+                    _, predicted_next_state = self.close_agent.get_action(state, object_goals)
                     action = np.random.beta(beta_param, beta_param, size=2*self.n_robots) * 2 - 1
                 else:
                     action, predicted_next_state = self.close_agent.get_action(state, object_goals)
@@ -175,7 +176,7 @@ class Experiment:
                 if self.close_replay_buffer.size == self.buffer_train_capacity:
                     train_from_buffer(
                         self.close_agent, self.close_replay_buffer, validation_buffer=None,
-                        pretrain_samples=self.buffer_train_capacity, save_agent=self.save_agent,
+                        pretrain_samples=self.close_replay_buffer.size, save_agent=self.save_agent,
                         train_epochs=self.train_epochs, batch_size=self.batch_size,
                         meta=self.meta,
                     )
@@ -313,6 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('-record_video', action='store_true')
     parser.add_argument('-save_real_video', action='store_true')
     parser.add_argument('-random_data', action='store_true')
+    parser.add_argument('-save_states', action='store_true')
 
     # agent
     parser.add_argument('-ensemble_size', type=int, default=1)
@@ -335,7 +337,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-scale', action='store_true')
     parser.add_argument('-dist', action='store_true')
-    parser.add_argument('-std', type=bool, default=0.01)
+    parser.add_argument('-std', type=float, default=0.01)
 
     # replay buffer
     parser.add_argument('-save_freq', type=int, default=50) # TODO implement this
@@ -343,7 +345,10 @@ if __name__ == '__main__':
     parser.add_argument('-buffer_train_capacity', type=int, default=100)
     parser.add_argument('-buffer_save_dir', type=str, default='~/kamigami_data/replay_buffers/online_buffers/')
     parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/meshgrid_buffers/')
-    parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless.npz')
+    parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_0615_duration3.npz')
+    # parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless.npz')
+    # parser.add_argument('-close_buffer_restore_path', type=str, default='/home/arovinsky/kamigami_data/replay_buffers/random_buffers/2object_beta300.npz')
+
 
     args = parser.parse_args()
     main(args)

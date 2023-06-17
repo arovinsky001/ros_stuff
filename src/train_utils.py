@@ -12,7 +12,7 @@ from utils import dcn, as_tensor
 
 
 def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_samples=500,
-                     save_agent=False, train_epochs=100, batch_size=500, meta=False):
+                     save_agent=False, train_epochs=100, batch_size=500, meta=False, close_agent=False):
     n_samples = min(pretrain_samples, replay_buffer.size)
     states = replay_buffer.states[:n_samples]
     actions = replay_buffer.actions[:n_samples]
@@ -42,7 +42,7 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
     training_losses, test_losses = train(
             agent, states, actions, next_states, validation_buffer,
             set_scalers=True, epochs=train_epochs, batch_size=batch_size,
-            meta=meta,
+            meta=meta, close_agent=close_agent,
     )
 
     if save_agent:
@@ -91,12 +91,21 @@ def train_from_buffer(agent, replay_buffer, validation_buffer=None, pretrain_sam
 
     # plt.show()
 
-def train(agent, train_state, train_action, train_next_state, validation_buffer, epochs=5, batch_size=256, set_scalers=False, meta=False):
+def train(agent, train_state, train_action, train_next_state, validation_buffer, epochs=5, batch_size=256, set_scalers=False, meta=False, close_agent=False):
     train_state, train_action, train_next_state = as_tensor(train_state, train_action, train_next_state)
 
+    # if not close_agent:
     val_state, val_action, val_next_state = validation_buffer.sample(validation_buffer.size)
     val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
     val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
+    # else:
+    #     rand_idx = np.random.permutation(len(train_state))
+    #     train_state, train_action, train_next_state = train_state[rand_idx], train_action[rand_idx], train_next_state[rand_idx]
+    #     val_state, val_action, val_next_state = train_state[:100], train_action[:100], train_next_state[:100]
+    #     train_state, train_action, train_next_state = train_state[100:], train_action[100:], train_next_state[100:]
+
+    #     val_state_delta = agent.dtu.compute_relative_delta_xysc(val_state, val_next_state)
+    #     val_state, val_action, val_next_state = as_tensor(val_state, val_action, val_next_state)
 
     for _, model in enumerate(agent.models):
         if set_scalers:

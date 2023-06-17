@@ -100,7 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('-hidden_dim', type=int, default=200)
     parser.add_argument('-hidden_depth', type=int, default=3)
     parser.add_argument('-lr', type=float, default=0.001)
-    parser.add_argument('-std', type=bool, default=0.02)
+    parser.add_argument('-std', type=float, default=0.02)
 
 
     args = parser.parse_args()

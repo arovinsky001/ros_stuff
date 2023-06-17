@@ -204,6 +204,8 @@ class MPPIAgent(MPCAgent):
         best_action = self.trajectory_mean[:self.action_dim]
         predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
 
+        # import pdb;pdb.set_trace()
+        # weights = np.exp(gamma * -total_costs); weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0); trajectory_mean = weighted_trajectories / weights.sum()
         return best_action, predicted_next_state
 
 
