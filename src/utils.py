@@ -3,6 +3,7 @@
 import os
 import numpy as np
 import torch
+from torch import nn
 
 import rospy
 import tf2_ros
@@ -38,6 +39,12 @@ def as_tensor(*args):
         else:
             ret.append(arg)
     return ret if len(ret) > 1 else ret[0]
+
+def initialize_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
 
 def sin_cos(angle):
     return torch.sin(angle), torch.cos(angle)

@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from utils import DataUtils, as_tensor, dcn
+from utils import DataUtils, as_tensor, dcn, initialize_weights
 
 
 STATE_DIM = 4
@@ -33,7 +33,7 @@ class DynamicsNetwork(nn.Module):
 
         layers = input_layer + hidden_layers + output_layer
         self.net = nn.Sequential(*layers)
-        self.net.apply(self._init_weights)
+        self.net.apply(initialize_weights)
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=self.lr)
@@ -49,12 +49,6 @@ class DynamicsNetwork(nn.Module):
 
     def __getattr__(self, key):
         return self.params[key]
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight.data)
-            if hasattr(m.bias, 'data'):
-                m.bias.data.fill_(0.0)
 
     def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
         states, actions = as_tensor(states, actions)
