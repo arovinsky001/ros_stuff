@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 
 import numpy as np
 
@@ -32,8 +32,8 @@ def figure8_trajectory(steps_per_episode, mpc_horizon, reverse=False):
     return np.array(goals)
 
 def S_trajectory(steps_per_episode, mpc_horizon, reverse=False):
-    back_circle_center = np.array([1.4, 0.7])
-    front_circle_center = np.array([0.8, 0.7])
+    back_circle_center = np.array([1.35, 0.85])
+    front_circle_center = np.array([0.75, 0.85])
     radius = np.linalg.norm(back_circle_center - front_circle_center) / 2
 
     goals = []
