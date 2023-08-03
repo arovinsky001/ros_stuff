@@ -18,7 +18,7 @@ class Environment:
         self.params = params
 
         self.post_action_sleep_time = 0.5
-        self.action_duration = 0.4 if self.use_object else 0.3
+        self.action_duration = 0.4 if self.use_object else 0.4
 
         self.episode_step = 0
         self.reverse_episode = True
@@ -82,12 +82,18 @@ class Environment:
         while not all([receipt for receipt in self.action_receipt_dict.values()]):
             rospy.sleep(0.01)
 
-        rospy.sleep(self.action_duration + self.post_action_sleep_time)
+        rospy.sleep(self.action_duration)
+
+        thresholds = np.array([0.018, 0.03, 0.04])
+        while not np.all(np.abs(self.get_all_velocities()) < thresholds):
+            rospy.sleep(0.04)
+
         for id in self.action_receipt_dict:
             self.action_receipt_dict[id] = False
 
         state = self.get_state()
-        self.episode_states.append(state)
+        if state is not None:
+            self.episode_states.append(state)
 
         if not reset:
             self.episode_step += 1
@@ -226,6 +232,12 @@ class Environment:
         pos[2] = (pos[2] + self.yaw_offsets[id]) % (2 * np.pi)
         return pos
 
+    def get_all_velocities(self):
+        object_vel = self.object_vel.copy()
+        robot_vels = [self.robot_vel_dict[id].copy() for id in self.robot_ids]
+        vels = np.stack(robot_vels + [object_vel], axis=0)
+        return vels
+
     def get_next_n_goals(self, n, episode_step=None):
         if episode_step is None:
             episode_step = self.episode_step
@@ -236,4 +248,5 @@ class Environment:
 
         goals = self.goals[start_step:end_step]
 
+        # goals = np.tile(self.goals[0], (n, 1))
         return goals
