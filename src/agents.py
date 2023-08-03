@@ -9,8 +9,6 @@ from replay_buffer import STATE_DIM, ACTION_DIM
 from dynamics_network import DynamicsNetwork
 from utils import DataUtils
 
-device = "cpu"
-
 
 class MPCAgent:
     def __init__(self, params):
@@ -22,13 +20,17 @@ class MPCAgent:
 
         # weights for MPC cost terms
         self.cost_weights_dict = {
-            "distance": 1.,
-            "heading": 0.,
-            "target_heading": 0.,
-            "action_norm": 0.,
-            "distance_bonus": 0.,
-            "separation": 0.,
-            "heading_difference": 0.,
+            "distance": self.cost_distance_weight,
+            # "heading": 0.,
+            # "target_heading": 0.,
+            "action_norm": self.cost_action_weight,
+            "distance_bonus": self.cost_distance_bonus_weight,
+            "separation": self.cost_separation_weight,
+            # "heading_difference": 0.,
+            "to_object_heading": self.cost_to_object_heading_weight,
+            "goal_object_robot_angle": self.cost_goal_angle_weight,
+            "realistic": self.cost_realistic_weight,
+            "object_delta": self.cost_object_delta_weight,
         }
 
         self.state_dim = STATE_DIM * (self.n_robots + self.use_object)
@@ -36,9 +38,6 @@ class MPCAgent:
         self.dtu = DataUtils(params)
 
         self.models = [DynamicsNetwork(params) for _ in range(self.ensemble_size)]
-        for model in self.models:
-            model.to(device)
-
         self.trained = False
 
         if self.exp_name is None:
@@ -48,15 +47,16 @@ class MPCAgent:
         self.save_dir = os.path.expanduser(f"~/kamigami_data/agents/")
 
         self.state_dict_save_dir = self.save_dir + self.exp_name + "/"
-        self.save_paths = [self.state_dict_save_dir + f"state_dict{i}.npz" for i in range(self.ensemble_size)]
+        self.save_paths = [self.state_dict_save_dir + f"robot_{'_'.join([str(id) for id in self.robot_ids])}_object_{self.use_object}_state_dict_{i}.pt" for i in range(self.ensemble_size)]
+        self.scale_idx_path = self.state_dict_save_dir + f"robot_{'_'.join([str(id) for id in self.robot_ids])}_object_{self.use_object}_scale_idx_.npy"
 
     def __getattr__(self, key):
         return self.params[key]
 
     def simulate(self, initial_state, action_sequence):
         mpc_samples, mpc_horizon = action_sequence.shape[0], action_sequence.shape[1]
-        initial_state = np.tile(initial_state, (mpc_samples, 1))
-        pred_state_sequence = np.empty((len(self.models), mpc_samples, mpc_horizon, self.state_dim))
+        initial_state = torch.tile(torch.tensor(initial_state, dtype=torch.float), (mpc_samples, 1))
+        pred_state_sequence = torch.empty((len(self.models), mpc_samples, mpc_horizon, self.state_dim))
 
         for i, model in enumerate(self.models):
             model.eval()
@@ -66,49 +66,65 @@ class MPCAgent:
 
                 with torch.no_grad():
                     if t == 0:
-                        pred_state_sequence[i, :, t] = model(initial_state, action, sample=False, delta=False)
+                        pred_state_sequence[i, :, t] = model(initial_state, action, sample=False, delta=False)                      #.cpu()
                     else:
-                        pred_state_sequence[i, :, t] = model(pred_state_sequence[i, :, t-1], action, sample=False, delta=False)
+                        pred_state_sequence[i, :, t] = model(pred_state_sequence[i, :, t-1], action, sample=False, delta=False)     #.cpu()
+
+        if torch.any(torch.isnan(pred_state_sequence) | torch.isinf(pred_state_sequence)):
+            import pdb;pdb.set_trace()
 
         return pred_state_sequence
 
-    def compute_trajectory_costs(self, predicted_state_sequence, sampled_actions, goals, robot_goals):
-        cost_dict = self.dtu.cost_dict(predicted_state_sequence, sampled_actions, goals, robot_goals=robot_goals)
+    def compute_trajectory_costs(self, predicted_state_sequence, sampled_actions, goals, robot_goals, initial_state):
+        cost_dict = self.dtu.cost_dict(predicted_state_sequence, sampled_actions, goals, initial_state, robot_goals=robot_goals)
 
-        ensemble_costs = np.zeros((self.ensemble_size, self.mpc_samples, self.mpc_horizon))
-        for cost_type in cost_dict:
-            ensemble_costs += cost_dict[cost_type] * self.cost_weights_dict[cost_type]
+        ensemble_costs = torch.zeros((self.ensemble_size, self.mpc_samples, self.mpc_horizon))
+        for cost_type, cost_weight in self.cost_weights_dict.items():
+            # if cost_type != 'distance':
+            ensemble_costs += cost_dict[cost_type] * cost_weight
 
-        discount = self.discount_factor ** np.arange(self.mpc_horizon)
+        # ensemble_costs = cost_dict['distance'] * (ensemble_costs + self.cost_weights_dict['distance'])
+
+        discount = self.discount_factor ** torch.arange(self.mpc_horizon)
         ensemble_costs *= discount[None, None, :]
 
         # average over ensemble and horizon dimensions to get per-sample cost
+        ensemble_costs_per_sample = ensemble_costs.mean(axis=2)
+        ensemble_costs_mean = ensemble_costs_per_sample.mean(axis=0)
+        ensemble_costs_std = ensemble_costs_per_sample.std(axis=0)
+
+        assert ensemble_costs_mean.shape == ensemble_costs_std.shape == (self.mpc_samples,)
+
         total_costs = ensemble_costs.mean(axis=(0, 2))
+        costs_std = ensemble_costs.std(axis=(0, 2))
+
+        if self.use_object:
+            total_costs += costs_std * self.cost_std_weight
+
         total_costs -= total_costs.min()
         total_costs /= total_costs.max()
 
-        return total_costs
+        if torch.any(torch.isnan(total_costs) | torch.isinf(total_costs)):
+            import pdb;pdb.set_trace()
 
-    def dump(self):
+        return total_costs.detach().cpu().numpy()
+
+    def dump(self, scale_idx=0):
         if not os.path.exists(self.state_dict_save_dir):
             os.makedirs(self.state_dict_save_dir)
 
         for model, path in zip(self.models, self.save_paths):
             torch.save(model.state_dict(), path)
 
-    def restore(self, restore_dir=None, recency=1):
-        if restore_dir is None:
-            # get latest subdir in save directory (state_dicts saved in subdir)
-            all_subdirs = [os.path.join(self.save_dir, d) for d in os.listdir(self.save_dir) if os.path.isdir(os.path.join(self.save_dir, d))]
-            subdirs_sorted_recency = sorted(all_subdirs, key=os.path.getctime)
-            restore_dir = subdirs_sorted_recency[-recency]
+        np.save(self.scale_idx_path, np.array(scale_idx))
 
-        sort_fn = lambda path: int(path.split(".")[0][-1])
-        restore_paths = [os.path.join(restore_dir, f) for f in os.listdir(restore_dir)]
-        restore_paths.sort(key=sort_fn)
+    def restore(self, restore_dir=None, recency=1):
+        restore_paths = self.save_paths
 
         for i in range(self.ensemble_size):
             self.models[i].load_state_dict(torch.load(restore_paths[i]))
+
+        self.scale_idx = np.load(self.scale_idx_path)
 
     def get_action(self, init_state, goals):
         return None, None
@@ -121,11 +137,11 @@ class RandomShootingAgent(MPCAgent):
     def get_action(self, initial_state, goals):
         sampled_actions = np.random.uniform(-1, 1, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-        total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals)
+        total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals, initial_state)
 
         best_idx = total_costs.argmin()
         best_action = sampled_actions[best_idx, 0]
-        predicted_next_state = predicted_state_sequence[:, best_idx, 0].mean(axis=0).squeeze()
+        predicted_next_state = predicted_state_sequence[:, best_idx, 0].mean(axis=0).squeeze().detach().cpu().numpy()
 
         return best_action, predicted_next_state
 
@@ -135,24 +151,20 @@ class CEMAgent(MPCAgent):
         return super().__init__(params, **kwargs)
 
     def get_action(self, initial_state, goals):
-        action_trajectory_dim = self.action_dim * self.mpc_horizon
-
-        trajectory_mean = np.zeros(action_trajectory_dim)
-        trajectory_std = np.zeros(action_trajectory_dim)
+        trajectory_mean = np.zeros((self.mpc_horizon, self.action_dim))
+        trajectory_std = np.zeros((self.mpc_horizon, self.action_dim))
         sampled_actions = np.random.uniform(-1, 1, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
 
         for i in range(self.refine_iters):
             if i > 0:
-                sampled_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(self.mpc_samples, action_trajectory_dim))
-                sampled_actions = sampled_actions.reshape(self.mpc_samples, self.mpc_horizon, self.action_dim)
-                sampled_actions = np.clip(sampled_actions, -1, 1)
+                sampled_actions = np.random.normal(loc=trajectory_mean, scale=trajectory_std, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
+                sampled_actions = np.clip(sampled_actions, -1., 1.)
 
             predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-            total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals)
+            total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals, initial_state)
 
-            action_trajectories = sampled_actions.reshape((self.mpc_samples, action_trajectory_dim))
             best_costs_idx = np.argsort(-total_costs)[-self.n_best:]
-            best_trajectories = action_trajectories[best_costs_idx]
+            best_trajectories = sampled_actions[best_costs_idx]
             best_trajectories_mean = best_trajectories.mean(axis=0)
             best_trajectories_std = best_trajectories.std(axis=0)
 
@@ -162,8 +174,8 @@ class CEMAgent(MPCAgent):
             if trajectory_std.max() < 0.02:
                 break
 
-        best_action = trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
+        best_action = trajectory_mean[0]
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze().detach().cpu().numpy()
 
         return best_action, predicted_next_state
 
@@ -175,7 +187,8 @@ class MPPIAgent(MPCAgent):
 
     def get_action(self, initial_state, goals):
         if self.trajectory_mean is None:
-            self.trajectory_mean = np.zeros((self.mpc_horizon, self.action_dim))
+            self.trajectory_mean = np.random.uniform(low=-1., high=1., size=(self.mpc_horizon, self.action_dim))
+            # self.trajectory_mean = np.zeros((self.mpc_horizon, self.action_dim))
 
         just_executed_action = self.trajectory_mean[0].copy()
         self.trajectory_mean[:-1] = self.trajectory_mean[1:]
@@ -184,28 +197,22 @@ class MPPIAgent(MPCAgent):
         noise = np.random.normal(loc=0, scale=self.noise_std, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
 
         for t in range(self.mpc_horizon):
-            if t == 0:
-                sampled_actions[:, t] = self.beta * (self.trajectory_mean[t] + noise[:, t]) \
-                                            + (1 - self.beta) * just_executed_action
-            else:
-                sampled_actions[:, t] = self.beta * (self.trajectory_mean[t] + noise[:, t]) \
-                                            + (1 - self.beta) * sampled_actions[:, t-1]
+            previous_action = just_executed_action if t == 0 else sampled_actions[:, t-1]
+            sampled_actions[:, t] = self.beta * (self.trajectory_mean[t] + noise[:, t]) + (1 - self.beta) * previous_action
 
         sampled_actions = np.clip(sampled_actions, -1, 1)
         predicted_state_sequence = self.simulate(initial_state, sampled_actions)
-        total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals)
+        total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, self.robot_goals, initial_state)
+        total_rewards = -total_costs
 
-        action_trajectories = sampled_actions.reshape((self.mpc_samples, -1))
+        weights = np.exp(self.gamma * (total_rewards - total_rewards.max()))
+        weighted_trajectories = (weights[:, None, None] * sampled_actions).sum(axis=0)
+        self.trajectory_mean = weighted_trajectories / (weights.sum() + 1e-10)
 
-        weights = np.exp(self.gamma * -total_costs)
-        weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0)
-        self.trajectory_mean = weighted_trajectories / weights.sum()
+        best_action = self.trajectory_mean[0]
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze().detach().cpu().numpy()
 
-        best_action = self.trajectory_mean[:self.action_dim]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze()
-
-        # import pdb;pdb.set_trace()
-        # weights = np.exp(gamma * -total_costs); weighted_trajectories = (weights[:, None] * action_trajectories).sum(axis=0); trajectory_mean = weighted_trajectories / weights.sum()
+        # weights = np.exp(gamma * (total_rewards - total_rewards.max())); weighted_trajectories = (weights[:, None, None] * sampled_actions).sum(axis=0); trajectory_mean = weighted_trajectories / (weights.sum() + 1e-10); print(trajectory_mean[0]); print(weights[np.argsort(weights)[-10:]])
         return best_action, predicted_next_state
 
 
@@ -244,46 +251,3 @@ class DifferentialDriveAgent:
         action /= max(1, max(abs(action)))
 
         return action, np.zeros(3)
-
-
-        # our best attempt at no-ribbon
-                # if t == 0:
-                #     object_state_temp = initial_state[..., -3:]
-                #     new_state = initial_state.copy()
-
-                #     new_state[..., :3] = object_state_temp
-                #     new_state[..., 3:] = initial_state[..., :-3]
-                # else:
-                #     object_state_temp = pred_state_sequence[i, :, t-1, -3:].copy()
-                #     new_state = pred_state_sequence[i, :, t-1].copy()
-
-                #     new_state[..., :3] = object_state_temp
-                #     new_state[..., 3:] = pred_state_sequence[i, :, t-1, :-3]
-
-                # new_state_relative = self.dtu.state_to_model_input(new_state).numpy()
-                # robot0_relative_xy = new_state_relative[..., :2]
-                # robot1_relative_xy = new_state_relative[..., 4:6]
-
-                # robot0_norm = np.linalg.norm(robot0_relative_xy, axis=-1)
-                # robot1_norm = np.linalg.norm(robot1_relative_xy, axis=-1)
-
-                # limit = 0.25
-
-                # robot0_norm[robot0_norm > limit] = limit
-                # robot1_norm[robot1_norm > limit] = limit
-
-                # robot0_norm = robot0_norm[:, None]
-                # robot1_norm = robot1_norm[:, None]
-
-                # robot0_relative_xy = robot0_relative_xy / np.linalg.norm(robot0_relative_xy, axis=-1, keepdims=True) * robot0_norm
-                # robot1_relative_xy = robot1_relative_xy / np.linalg.norm(robot1_relative_xy, axis=-1, keepdims=True) * robot1_norm
-
-                # robot0_xy = object_state_temp[..., :2] + robot0_relative_xy
-                # robot1_xy = object_state_temp[..., :2] + robot1_relative_xy
-
-                # if t == 0:
-                #     initial_state[..., :2] = robot0_xy
-                #     initial_state[..., 3:5] = robot1_xy
-                # else:
-                #     pred_state_sequence[i, :, t, :2] = robot0_xy
-                #     pred_state_sequence[i, :, t, 3:5] = robot1_xy
