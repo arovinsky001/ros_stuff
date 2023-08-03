@@ -77,7 +77,7 @@ class ReplayBuffer:
 
         np.savez_compressed(self.save_path,
                             states=self.states[:self.size],
-                            actions = self.actions[:self.size],
+                            actions=self.actions[:self.size],
                             next_states=self.next_states[:self.size],
                             idx=self.idx)
 
@@ -92,7 +92,25 @@ class ReplayBuffer:
 
         data = np.load(self.restore_path)
         n_samples = len(data["states"])
+        states, actions, next_states = data["states"], data["actions"], data["next_states"]
 
-        for i in range(n_samples):
-            idx = (i + data["idx"]) % n_samples
-            self.add(data["states"][idx], data["actions"][idx], data["next_states"][idx])
+        if self.idx + n_samples > self.buffer_capacity:
+            data_split_idx = self.buffer_capacity - self.idx
+            buffer_split_idx = n_samples - data_split_idx
+
+            np.copyto(self.states[self.idx:], states[:data_split_idx])
+            np.copyto(self.actions[self.idx:], actions[:data_split_idx])
+            np.copyto(self.next_states[self.idx:], next_states[:data_split_idx])
+
+            np.copyto(self.states[:buffer_split_idx], states[data_split_idx:])
+            np.copyto(self.actions[:buffer_split_idx], actions[data_split_idx:])
+            np.copyto(self.next_states[:buffer_split_idx], next_states[data_split_idx:])
+
+            self.idx = buffer_split_idx
+            self.full = True
+        else:
+            np.copyto(self.states[self.idx:self.idx+n_samples], states)
+            np.copyto(self.actions[self.idx:self.idx+n_samples], actions)
+            np.copyto(self.next_states[self.idx:self.idx+n_samples], next_states)
+
+            self.idx += n_samples
