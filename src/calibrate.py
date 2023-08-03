@@ -19,33 +19,37 @@ def main(args):
     params = {
         "episode_length": np.inf,
         "robot_goals": True,
-        "robot_id": 0,
-        "use_object": False,
+        "use_object": args.object_id != -1,
+        "object_id": args.object_id,
     }
 
-    robot_ids = args.ids[:-1]
-    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber(robot_ids)
+    robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, tf_buffer, tf_listener = make_state_subscriber(args.robot_ids)
     env = Environment(robot_pos, object_pos, corner_pos, robot_vel, object_vel, action_timestamp, params, calibrate=True)
     yaw_offsets = np.zeros(10)
 
-    for id in args.ids:
+    for i, id in enumerate(args.robot_ids):
         input(f"Place tag {id} on the left calibration point, aligned with the calibration line and hit enter.")
         left_state = env.get_state()
         input(f"Place tag {id} on the right calibration point, aligned with the calibration line and hit enter.")
         right_state = env.get_state()
 
-        robot_left_state, robot_right_state = left_state[:3], right_state[:3]
+        robot_left_state, robot_right_state = left_state[3*i:3*(i+1)], right_state[3*i:3*(i+1)]
         true_robot_vector = (robot_left_state - robot_right_state)[:2]
         true_robot_angle = np.arctan2(true_robot_vector[1], true_robot_vector[0])
         measured_robot_angle = robot_left_state[2]
         yaw_offsets[id] = true_robot_angle - measured_robot_angle
 
-        # if self.use_object:
-        #     object_left_state, object_right_state = left_state[3:6], right_state[3:6]
-        #     true_object_vector = (object_left_state - object_right_state)[:2]
-        #     true_object_angle = np.arctan2(true_object_vector[1], true_object_vector[0])
-        #     measured_object_angle = object_left_state[2]
-        #     yaw_offsets[self.object_id] = true_object_angle - measured_object_angle
+    if params["use_object"]:
+        input(f"Place tag {args.object_id} on the left calibration point, aligned with the calibration line and hit enter.")
+        left_state = env.get_state()
+        input(f"Place tag {args.object_id} on the right calibration point, aligned with the calibration line and hit enter.")
+        right_state = env.get_state()
+
+        object_left_state, object_right_state = left_state[-3:], right_state[-3:]
+        true_object_vector = (object_left_state - object_right_state)[:2]
+        true_object_angle = np.arctan2(true_object_vector[1], true_object_vector[0])
+        measured_object_angle = object_left_state[2]
+        yaw_offsets[args.object_id] = true_object_angle - measured_object_angle
 
     np.save(YAW_OFFSET_PATH, yaw_offsets)
 
@@ -53,7 +57,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-ids", nargs='+', type=int)
+    parser.add_argument("-robot_ids", nargs='+', type=int)
+    parser.add_argument("-object_id", type=int, default=-1)
 
     args = parser.parse_args()
     main(args)
