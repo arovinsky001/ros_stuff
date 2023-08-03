@@ -59,6 +59,12 @@ def rotate_vectors(vectors, angle):
     rotated_vector = (rotation @ vectors[:, :, None]).squeeze(dim=-1)
     return rotated_vector
 
+class SetParamsAsAttributes:
+    def __init__(self, params):
+        for key, value in params.items():
+            self.__setattr__(key, value)
+        self.dtu = DataUtils(params)
+
 
 ### ROS UTILS ###
 
@@ -162,29 +168,31 @@ class DataUtils:
 
         return relative_states
 
+    def state_to_model_input_tdm(self, state):
+        state = as_tensor(state)
+        robot_states = self.state_to_model_input(state)
+        object_states = torch.zeros(*robot_states.shape[:-1], 4)
+        return torch.cat([robot_states, object_states], dim=-1)
+
     def compute_relative_delta_xysc(self, state, next_state):
         state, next_state = as_tensor(state, next_state)
 
         n_states = self.n_robots + self.use_object
         relative_delta_xysc = torch.empty((state.size(0), 4*n_states))
-        base_heading = state[:, -1]
 
         for i in range(n_states):
-            cur_state, cur_next_state = state[:, 3*i:3*(i+1)], next_state[:, 3*i:3*(i+1)]
+            cur_state, cur_next_state = state[..., 3*i:3*(i+1)], next_state[..., 3*i:3*(i+1)]
 
             xy, next_xy = cur_state[:, :2], cur_next_state[:, :2]
             heading, next_heading = cur_state[:, 2], cur_next_state[:, 2]
 
             absolute_delta_xy = next_xy - xy
-            relative_delta_xy = rotate_vectors(absolute_delta_xy, -base_heading)
+            relative_delta_xy = rotate_vectors(absolute_delta_xy, -heading)
 
-            relative_heading = signed_angle_difference(heading, base_heading)
-            relative_next_heading = signed_angle_difference(next_heading, base_heading)
-            rel_sin, rel_cos = sin_cos(relative_heading)
-            rel_next_sin, rel_next_cos = sin_cos(relative_next_heading)
-            relative_delta_sc = torch.stack((rel_next_sin - rel_sin, rel_next_cos - rel_cos), dim=1)
+            heading_difference = signed_angle_difference(next_heading, heading)
+            heading_difference_sc = torch.stack(sin_cos(heading_difference), dim=1)
 
-            relative_delta_xysc[:, 4*i:4*(i+1)] = torch.cat((relative_delta_xy, relative_delta_sc), dim=1)
+            relative_delta_xysc[:, 4*i:4*(i+1)] = torch.cat((relative_delta_xy, heading_difference_sc), dim=1)
 
         return relative_delta_xysc
 
@@ -193,7 +201,6 @@ class DataUtils:
 
         n_states = self.n_robots + self.use_object
         next_state = torch.empty_like(state)
-        base_heading = state[:, -1]
 
         for i in range(n_states):
             cur_state, cur_relative_delta = state[:, 3*i:3*(i+1)], relative_delta[:, 4*i:4*(i+1)]
@@ -201,94 +208,166 @@ class DataUtils:
             absolute_xy, absolute_heading = cur_state[:, :2], cur_state[:, 2]
             relative_delta_xy, relative_delta_sc = cur_relative_delta[:, :2], cur_relative_delta[:, 2:]
 
-            absolute_delta_xy = rotate_vectors(relative_delta_xy, base_heading)
+            absolute_delta_xy = rotate_vectors(relative_delta_xy, absolute_heading)
             absolute_next_xy = absolute_xy + absolute_delta_xy
 
-            relative_heading = signed_angle_difference(absolute_heading, base_heading)
-            relative_sc = torch.stack(sin_cos(relative_heading), dim=1)
-            relative_next_sc = relative_sc + relative_delta_sc
-            rel_next_sin, rel_next_cos = relative_next_sc.T
-            relative_next_heading = torch.atan2(rel_next_sin, rel_next_cos)
-            absolute_next_heading = signed_angle_difference(relative_next_heading, -base_heading)
+            relative_delta_heading = torch.atan2(*relative_delta_sc.T)
+            absolute_next_heading = signed_angle_difference(absolute_heading, -relative_delta_heading)
 
             next_state[:, 3*i:3*(i+1)] = torch.cat((absolute_next_xy, absolute_next_heading[:, None]), dim=1)
 
         return next_state
 
-    def cost_dict(self, state, action, goals, robot_goals=False, signed=False):
+
+    def cost_dict(self, state, action, goals, initial_state, robot_goals=False, signed=False):
+        initial_state, action, goals = as_tensor(initial_state, action, goals)
         state_dim = 3
         if self.use_object:
-            robot_state = state[..., :state_dim]
+            robot_states = state[..., :self.n_robots*state_dim].reshape(*state.shape[:-1], self.n_robots, state_dim)
+            robot_states = torch.movedim(robot_states, -2, 0)
             object_state = state[..., -state_dim:]
 
-            effective_state = robot_state if robot_goals else object_state
+            effective_state = robot_states[0] if robot_goals else object_state
         else:
             effective_state = state[..., :state_dim]
 
         # distance to goal position
         state_to_goal_xy = (goals - effective_state)[..., :-1]
-        dist_cost = np.linalg.norm(state_to_goal_xy, axis=-1)
+        dist_cost = torch.norm(state_to_goal_xy, dim=-1)
         if signed:
             dist_cost *= forward
 
+        # bonus for being very close to the goal
+        dist_bonus = (torch.abs(dist_cost) < 0.01) * -1
+
         # difference between current and toward-goal heading
         current_angle = effective_state[..., 2]
-        target_angle = np.arctan2(state_to_goal_xy[..., 1], state_to_goal_xy[..., 0])
+        target_angle = torch.atan2(state_to_goal_xy[..., 1], state_to_goal_xy[..., 0])
         heading_cost = signed_angle_difference(target_angle, current_angle)
 
         left = (heading_cost > 0) * 2 - 1
-        forward = (np.abs(heading_cost) < np.pi / 2) * 2 - 1
+        forward = (torch.abs(heading_cost) < torch.pi / 2) * 2 - 1
 
-        heading_cost[forward == -1] = (heading_cost[forward == -1] + np.pi) % (2 * np.pi)
-        heading_cost = np.stack((heading_cost, 2 * np.pi - heading_cost)).min(axis=0)
+        heading_cost[forward == -1] = (heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+        heading_cost = torch.stack((heading_cost, 2 * torch.pi - heading_cost)).min(dim=0)[0]
 
         if signed:
             heading_cost *= left * forward
         else:
-            heading_cost = np.abs(heading_cost)
+            heading_cost = torch.abs(heading_cost)
 
         # difference between current and specified heading
         target_angle = goals[..., 2]
         target_heading_cost = signed_angle_difference(target_angle, current_angle)
 
         left = (target_heading_cost > 0) * 2 - 1
-        forward = (np.abs(target_heading_cost) < np.pi / 2) * 2 - 1
+        forward = (torch.abs(target_heading_cost) < torch.pi / 2) * 2 - 1
 
-        target_heading_cost[forward == -1] = (target_heading_cost[forward == -1] + np.pi) % (2 * np.pi)
-        target_heading_cost = np.stack((target_heading_cost, 2 * np.pi - target_heading_cost)).min(axis=0)
+        target_heading_cost[forward == -1] = (target_heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+        target_heading_cost = torch.stack((target_heading_cost, 2 * torch.pi - target_heading_cost)).min(dim=0)[0]
 
         if signed:
             target_heading_cost *= left * forward
         else:
-            target_heading_cost = np.abs(target_heading_cost)
+            target_heading_cost = torch.abs(target_heading_cost)
+
+        # object state change
+        if self.use_object:
+            object_state_with_init = torch.cat([torch.tile(initial_state[-3:], (*object_state.shape[:2], 1))[..., None, :], object_state], dim=-2)
+            object_xy_delta_cost = -torch.norm(torch.diff(object_state_with_init[..., :-1], dim=-2), dim=-1)
+        else:
+            object_xy_delta_cost = torch.tensor([0.])
 
         # object-robot separation distance
         if self.use_object:
-            robot_states = state[..., :self.n_robots*state_dim].reshape(*state.shape[:-1], self.n_robots, state_dim)
-            robot_states = robot_states.transpose(3, 0, 1, 2, 4)
             object_to_robot_xy = (object_state - robot_states)[..., :-1]
-            sep_cost = np.linalg.norm(object_to_robot_xy, axis=-1).sum(axis=0)
+            object_to_robot_dist = torch.norm(object_to_robot_xy, dim=-1)
+            # object_to_robot_dist[object_to_robot_dist > 0.24] *= 3.
+            sep_cost = object_to_robot_dist.mean(dim=0)
+            # sep_cost = object_to_robot_dist.max(dim=0)[0]
         else:
-            sep_cost = np.array([0.])
+            sep_cost = torch.tensor([0.])
+
+        # realistic distance
+        # separation distance between each robot and the distance between object and robots
+        if self.use_object:
+            thresh = 0.14
+
+            object_to_robot_dist = torch.norm((object_state - robot_states)[..., :-1], dim=-1)
+            robot_to_robot_dist = torch.norm((robot_states[0] - robot_states[1])[..., :-1], dim=-1)
+            all_dists = torch.cat((object_to_robot_dist, robot_to_robot_dist[None, ...]), dim=0)
+            all_dists = torch.clip(all_dists, 0., thresh)
+
+            realistic_cost = (thresh - all_dists).mean(dim=0)
+        else:
+            realistic_cost = torch.tensor([0.])
 
         # object-robot heading difference
         if self.use_object:
-            robot_theta, object_theta = robot_state[..., -1], object_state[..., -1]
-            heading_diff = (robot_theta - object_theta) % (2 * np.pi)
-            heading_diff_cost = np.stack((heading_diff, 2 * np.pi - heading_diff), axis=1).min(axis=1)
+            robot_theta, object_theta = robot_states[..., -1], object_state[..., -1]
+            heading_diff = (robot_theta - object_theta) % (2 * torch.pi)
+            heading_diff_cost = torch.stack((heading_diff, 2 * torch.pi - heading_diff), dim=1).min(dim=1)[0]
         else:
-            heading_diff_cost = np.array([0.])
+            heading_diff_cost = torch.tensor([0.])
 
         # action magnitude
-        norm_cost = -np.linalg.norm(action, axis=-1)
+        norm_cost = -torch.norm(action, dim=-1)
+
+        # to-object heading
+        if self.use_object:
+            robot_xy = robot_states[..., :2]
+            robot_heading = robot_states[..., -1]
+
+            object_xy = object_state[..., :2]
+            state_to_object_xy = (object_xy - robot_xy)
+
+            target_heading = torch.atan2(state_to_object_xy[..., 1], state_to_object_xy[..., 0])
+            to_object_heading_cost = signed_angle_difference(target_heading, robot_heading)
+
+            left = (to_object_heading_cost > 0) * 2 - 1
+            forward = (torch.abs(to_object_heading_cost) < torch.pi / 2) * 2 - 1
+
+            to_object_heading_cost[forward == -1] = (to_object_heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+            to_object_heading_cost = torch.stack((to_object_heading_cost, 2 * torch.pi - to_object_heading_cost)).min(dim=0)[0]
+
+            if signed:
+                to_object_heading_cost *= left * forward
+            else:
+                to_object_heading_cost = torch.abs(to_object_heading_cost)
+                to_object_heading_cost = to_object_heading_cost.mean(dim=0)
+        else:
+            to_object_heading_cost = torch.tensor([0.])
+
+        # goal-object-robot angle
+        if self.use_object:
+            robot_xy = robot_states[..., :2]
+
+            object_xy = object_state[..., :2]
+            goal_xy = goals[..., :2]
+
+            a = torch.norm(object_xy - robot_xy, dim=-1)
+            b = torch.norm(goal_xy - object_xy, dim=-1)
+            c = torch.norm(goal_xy - robot_xy, dim=-1)
+
+            goal_object_robot_angle_cost_per_robot = torch.abs(torch.pi - torch.arccos((a**2 + b**2 - c**2) / (2 * a * b + 1e-6)))
+            goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.mean(dim=0)
+            # goal_object_robot_angle_cost[dist_cost < 0.03] = 0.
+            # goal_object_robot_angle_cost[goal_object_robot_angle_cost < torch.pi / 6.] = 0.
+        else:
+            goal_object_robot_angle_cost = torch.tensor([0.])
 
         cost_dict = {
             "distance": dist_cost,
+            "distance_bonus": dist_bonus,
             "heading": heading_cost,
             "target_heading": target_heading_cost,
             "separation": sep_cost,
             "heading_difference": heading_diff_cost,
             "action_norm": norm_cost,
+            "to_object_heading": to_object_heading_cost,
+            "goal_object_robot_angle": goal_object_robot_angle_cost,
+            "realistic": realistic_cost,
+            "object_delta": object_xy_delta_cost,
         }
 
         return cost_dict

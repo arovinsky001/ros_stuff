@@ -16,11 +16,14 @@ class DynamicsNetwork(nn.Module):
         super(DynamicsNetwork, self).__init__()
         self.params = params
 
+        for key, value in params.items():
+            self.__setattr__(key, value)
+
         self.dtu = DataUtils(params)
         self.update_lr = nn.parameter.Parameter(torch.tensor(self.lr))
 
         input_dim = ACTION_DIM * self.n_robots + STATE_DIM * (self.n_robots + self.use_object - 1)
-        output_dim = STATE_DIM * (self.n_robots + self.use_object)
+        output_dim = STATE_DIM * (self.n_robots + self.use_object) * 2
 
         # create networks
         assert self.hidden_depth >= 1
@@ -43,12 +46,6 @@ class DynamicsNetwork(nn.Module):
 
         self.output_mean = 0
         self.output_std = 1
-
-    def __setattr__(self, name, value):
-        self.__dict__[name] = value
-
-    def __getattr__(self, key):
-        return self.params[key]
 
     def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
         states, actions = as_tensor(states, actions)
@@ -82,8 +79,8 @@ class DynamicsNetwork(nn.Module):
             outputs = self.net(inputs)
 
         if self.dist:
-            mean = outputs
-            std = torch.ones_like(mean) * self.std
+            mean, log_std = torch.chunk(outputs, 2, dim=1)
+            std = log_std.exp()
             dist = torch.distributions.normal.Normal(mean, std)
             if return_dist:
                 return dist
@@ -91,11 +88,11 @@ class DynamicsNetwork(nn.Module):
         else:
             state_deltas_model = outputs
 
-        if self.scale:
-            state_deltas_model = self.unstandardize_output(state_deltas_model)
-
         if delta:
             return state_deltas_model
+
+        if self.scale:
+            state_deltas_model = self.unstandardize_output(state_deltas_model)
 
         next_states_model = self.dtu.next_state_from_relative_delta(states, state_deltas_model)
         return next_states_model
@@ -105,9 +102,10 @@ class DynamicsNetwork(nn.Module):
         state, action, next_state = as_tensor(state, action, next_state)
         state_delta = self.dtu.compute_relative_delta_xysc(state, next_state)
 
+        if self.scale:
+            state_delta = self.standardize_output(state_delta)
+
         if self.dist:
-            if self.scale:
-                state_delta = self.standardize_output(state_delta)
             dist = self(state, action, return_dist=True)
             loss = -dist.log_prob(state_delta.detach()).mean()
         else:
