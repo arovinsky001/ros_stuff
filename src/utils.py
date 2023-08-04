@@ -1,244 +1,373 @@
 #!/usr/bin/python3
 
 import os
-from abc import abstractmethod
-
 import numpy as np
+import torch
+from torch import nn
+
 import rospy
-
-from replay_buffer import ReplayBuffer
-
-from ros_stuff.srv import CommandAction
-from ros_stuff.msg import RobotCmd
-
-from ar_track_alvar_msgs.msg import AlvarMarkers
-from tf.transformations import euler_from_quaternion
+import tf2_ros
+from std_msgs.msg import Int8
+from ros_stuff.msg import RobotCmd, MultiRobotCmd, ProcessedStates
 
 
-class KamigamiInterface:
-    def __init__(self, robot_ids, save_path, calibrate):
-        self.save_path = save_path
-        self.robot_ids = np.array(robot_ids)
+YAW_OFFSET_PATH = os.path.expanduser("~/kamigami_data/calibration/yaw_offsets.npy")
 
-        max_pwm = 0.999
-        self.action_range = np.array([[-max_pwm, -max_pwm], [max_pwm, max_pwm]])
-        self.duration = 0.2
-        self.current_states = np.zeros((len(self.robot_ids), 4))    # (x, y, theta, id)
 
-        # for perturbing robots in case not visible
-        self.perturb_request = RobotCmd()
-        self.perturb_request.left_pwm = 0.9
-        self.perturb_request.right_pwm = -0.9
-        self.perturb_request.duration = 0.2
+### TORCH UTILS ###
 
-        self.perturb_count = 0
-        self.n_updates = 0
-        self.last_n_updates = 0
-        self.not_found = False
-        self.started = False
-        
-        self.n_avg_states = 1
-        self.n_wait_updates = 1
-        self.max_perturb_count = 5
-        self.n_clip = 3
-        self.flat_lim = 0.6
-        self.save_freq = 10
-        self.remap = False
+def to_device(*args, device=torch.device("cpu")):
+    ret = []
+    for arg in args:
+        ret.append(arg.to(device))
+    return ret if len(ret) > 1 else ret[0]
 
-        self.replay_buffer = ReplayBuffer(capacity=400, state_dim=3, action_dim=2, next_state_dim=3)
-
-        self.states = []
-        self.actions = []
-        self.next_states = []
-        self.done = False
-
-        rospy.init_node("kamigami_interface")
-
-        self.service_proxies = []
-        for id in self.robot_ids:
-            print(f"waiting for robot {id} service")
-            rospy.wait_for_service(f"/kami{id}/server")
-            self.service_proxies.append(rospy.ServiceProxy(f"/kami{id}/server", CommandAction))
-        print("connected to all robot services")
-
-        print("waiting for /ar_pose_marker rostopic")
-        rospy.Subscriber("/ar_pose_marker", AlvarMarkers, self.update_states, queue_size=1)
-        print("subscribed to /ar_pose_marker")
-
-        self.tag_offset_path = "/home/bvanbuskirk/Desktop/MPCDynamicsKamigami/sim/data/tag_offsets.npy"
-        if not os.path.exists(self.tag_offset_path) or calibrate:
-            self.calibrate()
-        self.tag_offsets = np.load(self.tag_offset_path)
-
-    @abstractmethod
-    def step(self):
-        pass
-
-    @abstractmethod
-    def get_take_actions(self):
-        pass
-
-    def calibrate(self):
-        if os.path.exists(self.tag_offset_path):
-            tag_offsets = np.load(self.tag_offset_path)
+def dcn(*args):
+    ret = []
+    for arg in args:
+        if isinstance(arg, np.ndarray):
+            ret.append(arg)
         else:
-            tag_offsets = np.zeros(10)
+            ret.append(arg.detach().cpu().numpy())
+    return ret if len(ret) > 1 else ret[0]
 
-        for id in self.robot_ids:
-            robot_idx = np.argwhere(self.robot_ids == id).squeeze().item()
-            input(f"Place robot {id} on the left calibration point, aligned with the calibration line and hit enter.")
-            left_state = self.get_states(wait=False)[robot_idx]
-            input(f"Place robot {id} on the right calibration point, aligned with the calibration line and hit enter.")
-            right_state = self.get_states(wait=False)[robot_idx]
+def as_tensor(*args):
+    ret = []
+    for arg in args:
+        if isinstance(arg, np.ndarray):
+            ret.append(torch.as_tensor(arg, dtype=torch.float))
+        else:
+            ret.append(arg)
+    return ret if len(ret) > 1 else ret[0]
 
-            true_vector = (left_state - right_state)[:2]
-            true_angle = np.arctan2(true_vector[1], true_vector[0])
-            # measured_angle = 0.5 * (left_state + right_state)[2]
-            measured_angle = left_state[2]
+def initialize_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
 
-            tag_offsets[id] = true_angle - measured_angle
-        
-        np.save(self.tag_offset_path, tag_offsets)
+def sin_cos(angle):
+    return torch.sin(angle), torch.cos(angle)
 
-    def update_states(self, msg):
-        found_robots = [False] * len(self.robot_ids)
-        for marker in msg.markers:
-            if marker.id in self.robot_ids:
-                idx = np.argwhere(self.robot_ids == marker.id).squeeze().item()
-                state = self.current_states[idx]
-                found_robots[idx] = True
+def signed_angle_difference(angle1, angle2):
+    return (angle1 - angle2 + 3 * torch.pi) % (2 * torch.pi) - torch.pi
+
+def rotate_vectors(vectors, angle):
+    sin, cos = sin_cos(angle)
+    rotation = torch.stack((torch.stack((cos, -sin)),
+                            torch.stack((sin, cos)))).permute(2, 0, 1)
+    rotated_vector = (rotation @ vectors[:, :, None]).squeeze(dim=-1)
+    return rotated_vector
+
+class SetParamsAsAttributes:
+    def __init__(self, params):
+        for key, value in params.items():
+            self.__setattr__(key, value)
+        self.dtu = DataUtils(params)
+
+
+### ROS UTILS ###
+
+def build_action_msg(action, duration, robot_ids):
+    multi_action_msg = MultiRobotCmd()
+    multi_action_msg.robot_commands = []
+
+    action = np.clip(action, -1, 1)
+    action_list = np.split(action, len(action) / 2.)
+
+    for action, id in zip(action_list, robot_ids):
+        action_msg = RobotCmd()
+        action_msg.robot_id = id
+        action_msg.left_pwm = action[0]
+        action_msg.right_pwm = action[1]
+        action_msg.duration = duration
+
+        multi_action_msg.robot_commands.append(action_msg)
+
+    return multi_action_msg
+
+def make_state_subscriber(robot_ids):
+    pos_dim = 3
+    vel_dim = 3
+
+    robot_pos_dict = {id: np.empty(pos_dim) for id in robot_ids}
+    robot_vel_dict = {id: np.empty(vel_dim) for id in robot_ids}
+
+    object_pos = np.empty(pos_dim)
+    object_vel = np.empty(vel_dim)
+
+    corner_pos = np.empty(pos_dim)
+
+    def state_callback(msg):
+        robot_states, os, cs = msg.robot_states, msg.object_state, msg.corner_state
+
+        for rs in robot_states:
+            if rs.robot_id in robot_pos_dict:
+                robot_pos_dict[rs.robot_id][:] = np.array([rs.x, rs.y, rs.yaw])
+                robot_vel_dict[rs.robot_id][:] = np.array([rs.x_vel, rs.y_vel, rs.yaw_vel])
+
+        object_pos[:] = np.array([os.x, os.y, os.yaw])
+        object_vel[:] = np.array([os.x_vel, os.y_vel, os.yaw_vel])
+
+        corner_pos[:] = np.array([cs.x, cs.y, cs.yaw])
+
+    print("waiting for /processed_state topic from state publisher")
+    rospy.Subscriber("/processed_state", ProcessedStates, state_callback, queue_size=1)
+    print("subscribed to /processed_state")
+
+    # get action receipt from kamigami
+    action_receipt_dict = {id: False for id in robot_ids}
+
+    def action_receipt_callback(msg):
+        action_receipt_dict[msg.data] = True
+
+    for id in robot_ids:
+        print(f"waiting for /action_receipt topic from kamigami {id}")
+        rospy.Subscriber(f"/action_receipt_{id}", Int8, action_receipt_callback, queue_size=1)
+        print(f"subscribed to /action_receipt_{id}")
+
+    print("setting up tf buffer/listener")
+    tf_buffer = tf2_ros.Buffer()
+    tf_listener = tf2_ros.TransformListener(tf_buffer)
+    print("finished setting up tf buffer/listener")
+
+    return robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, tf_buffer, tf_listener
+
+
+class DataUtils:
+    def __init__(self, params):
+        self.params = params
+
+    def __getattr__(self, key):
+        return self.params[key]
+
+    def state_to_model_input(self, state):
+        if self.n_robots == 1 and not self.use_object:
+            return None
+
+        state = as_tensor(state)
+
+        n_states = self.n_robots + self.use_object
+        relative_states = torch.empty((state.size(0), 4*(n_states-1)))
+
+        # use object state as base state
+        base_xy, base_heading = state[:, -3:-1], state[:, -1]
+
+        for i in range(0, n_states-1):
+            cur_state = state[:, 3*i:3*(i+1)]
+            xy, heading = cur_state[:, :2], cur_state[:, 2]
+
+            absolute_state_to_base_xy = base_xy - xy
+            relative_state_to_base_xy = rotate_vectors(absolute_state_to_base_xy, -base_heading)
+
+            relative_state_heading = signed_angle_difference(heading, base_heading)
+            relative_state_sc = torch.stack(sin_cos(relative_state_heading), dim=1)
+
+            relative_state = torch.cat((relative_state_to_base_xy, relative_state_sc), dim=1)
+            relative_states[:, 4*i:4*(i+1)] = relative_state
+
+        return relative_states
+
+    def state_to_model_input_tdm(self, state):
+        state = as_tensor(state)
+        robot_states = self.state_to_model_input(state)
+        object_states = torch.zeros(*robot_states.shape[:-1], 4)
+        return torch.cat([robot_states, object_states], dim=-1)
+
+    def compute_relative_delta_xysc(self, state, next_state):
+        state, next_state = as_tensor(state, next_state)
+
+        n_states = self.n_robots + self.use_object
+        relative_delta_xysc = torch.empty((state.size(0), 4*n_states))
+
+        for i in range(n_states):
+            cur_state, cur_next_state = state[..., 3*i:3*(i+1)], next_state[..., 3*i:3*(i+1)]
+
+            xy, next_xy = cur_state[:, :2], cur_next_state[:, :2]
+            heading, next_heading = cur_state[:, 2], cur_next_state[:, 2]
+
+            absolute_delta_xy = next_xy - xy
+            relative_delta_xy = rotate_vectors(absolute_delta_xy, -heading)
+
+            heading_difference = signed_angle_difference(next_heading, heading)
+            heading_difference_sc = torch.stack(sin_cos(heading_difference), dim=1)
+
+            relative_delta_xysc[:, 4*i:4*(i+1)] = torch.cat((relative_delta_xy, heading_difference_sc), dim=1)
+
+        return relative_delta_xysc
+
+    def next_state_from_relative_delta(self, state, relative_delta):
+        state, relative_delta = as_tensor(state, relative_delta)
+
+        n_states = self.n_robots + self.use_object
+        next_state = torch.empty_like(state)
+
+        for i in range(n_states):
+            cur_state, cur_relative_delta = state[:, 3*i:3*(i+1)], relative_delta[:, 4*i:4*(i+1)]
+
+            absolute_xy, absolute_heading = cur_state[:, :2], cur_state[:, 2]
+            relative_delta_xy, relative_delta_sc = cur_relative_delta[:, :2], cur_relative_delta[:, 2:]
+
+            absolute_delta_xy = rotate_vectors(relative_delta_xy, absolute_heading)
+            absolute_next_xy = absolute_xy + absolute_delta_xy
+
+            relative_delta_heading = torch.atan2(*relative_delta_sc.T)
+            absolute_next_heading = signed_angle_difference(absolute_heading, -relative_delta_heading)
+
+            next_state[:, 3*i:3*(i+1)] = torch.cat((absolute_next_xy, absolute_next_heading[:, None]), dim=1)
+
+        return next_state
+
+
+    def cost_dict(self, state, action, goals, initial_state, robot_goals=False, signed=False):
+        initial_state, action, goals = as_tensor(initial_state, action, goals)
+        state_dim = 3
+        if self.use_object:
+            robot_states = state[..., :self.n_robots*state_dim].reshape(*state.shape[:-1], self.n_robots, state_dim)
+            robot_states = torch.movedim(robot_states, -2, 0)
+            object_state = state[..., -state_dim:]
+
+            effective_state = robot_states[0] if robot_goals else object_state
+        else:
+            effective_state = state[..., :state_dim]
+
+        # distance to goal position
+        state_to_goal_xy = (goals - effective_state)[..., :-1]
+        dist_cost = torch.norm(state_to_goal_xy, dim=-1)
+        if signed:
+            dist_cost *= forward
+
+        # bonus for being very close to the goal
+        dist_bonus = (torch.abs(dist_cost) < 0.01) * -1
+
+        # difference between current and toward-goal heading
+        current_angle = effective_state[..., 2]
+        target_angle = torch.atan2(state_to_goal_xy[..., 1], state_to_goal_xy[..., 0])
+        heading_cost = signed_angle_difference(target_angle, current_angle)
+
+        left = (heading_cost > 0) * 2 - 1
+        forward = (torch.abs(heading_cost) < torch.pi / 2) * 2 - 1
+
+        heading_cost[forward == -1] = (heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+        heading_cost = torch.stack((heading_cost, 2 * torch.pi - heading_cost)).min(dim=0)[0]
+
+        if signed:
+            heading_cost *= left * forward
+        else:
+            heading_cost = torch.abs(heading_cost)
+
+        # difference between current and specified heading
+        target_angle = goals[..., 2]
+        target_heading_cost = signed_angle_difference(target_angle, current_angle)
+
+        left = (target_heading_cost > 0) * 2 - 1
+        forward = (torch.abs(target_heading_cost) < torch.pi / 2) * 2 - 1
+
+        target_heading_cost[forward == -1] = (target_heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+        target_heading_cost = torch.stack((target_heading_cost, 2 * torch.pi - target_heading_cost)).min(dim=0)[0]
+
+        if signed:
+            target_heading_cost *= left * forward
+        else:
+            target_heading_cost = torch.abs(target_heading_cost)
+
+        # object state change
+        if self.use_object:
+            object_state_with_init = torch.cat([torch.tile(initial_state[-3:], (*object_state.shape[:2], 1))[..., None, :], object_state], dim=-2)
+            object_xy_delta_cost = -torch.norm(torch.diff(object_state_with_init[..., :-1], dim=-2), dim=-1)
+        else:
+            object_xy_delta_cost = torch.tensor([0.])
+
+        # object-robot separation distance
+        if self.use_object:
+            object_to_robot_xy = (object_state - robot_states)[..., :-1]
+            object_to_robot_dist = torch.norm(object_to_robot_xy, dim=-1)
+            # object_to_robot_dist[object_to_robot_dist > 0.24] *= 3.
+            sep_cost = object_to_robot_dist.mean(dim=0)
+            # sep_cost = object_to_robot_dist.max(dim=0)[0]
+        else:
+            sep_cost = torch.tensor([0.])
+
+        # realistic distance
+        # separation distance between each robot and the distance between object and robots
+        if self.use_object:
+            thresh = 0.14
+
+            object_to_robot_dist = torch.norm((object_state - robot_states)[..., :-1], dim=-1)
+            robot_to_robot_dist = torch.norm((robot_states[0] - robot_states[1])[..., :-1], dim=-1)
+            all_dists = torch.cat((object_to_robot_dist, robot_to_robot_dist[None, ...]), dim=0)
+            all_dists = torch.clip(all_dists, 0., thresh)
+
+            realistic_cost = (thresh - all_dists).mean(dim=0)
+        else:
+            realistic_cost = torch.tensor([0.])
+
+        # object-robot heading difference
+        if self.use_object:
+            robot_theta, object_theta = robot_states[..., -1], object_state[..., -1]
+            heading_diff = (robot_theta - object_theta) % (2 * torch.pi)
+            heading_diff_cost = torch.stack((heading_diff, 2 * torch.pi - heading_diff), dim=1).min(dim=1)[0]
+        else:
+            heading_diff_cost = torch.tensor([0.])
+
+        # action magnitude
+        norm_cost = -torch.norm(action, dim=-1)
+
+        # to-object heading
+        if self.use_object:
+            robot_xy = robot_states[..., :2]
+            robot_heading = robot_states[..., -1]
+
+            object_xy = object_state[..., :2]
+            state_to_object_xy = (object_xy - robot_xy)
+
+            target_heading = torch.atan2(state_to_object_xy[..., 1], state_to_object_xy[..., 0])
+            to_object_heading_cost = signed_angle_difference(target_heading, robot_heading)
+
+            left = (to_object_heading_cost > 0) * 2 - 1
+            forward = (torch.abs(to_object_heading_cost) < torch.pi / 2) * 2 - 1
+
+            to_object_heading_cost[forward == -1] = (to_object_heading_cost[forward == -1] + torch.pi) % (2 * torch.pi)
+            to_object_heading_cost = torch.stack((to_object_heading_cost, 2 * torch.pi - to_object_heading_cost)).min(dim=0)[0]
+
+            if signed:
+                to_object_heading_cost *= left * forward
             else:
-                continue
-                            
-            o = marker.pose.pose.orientation
-            o_list = [o.x, o.y, o.z, o.w]
-            x, y, z = euler_from_quaternion(o_list)
-
-            if abs(np.sin(x)) > self.flat_lim or abs(np.sin(y)) > self.flat_lim and self.started:
-                print("MARKER NOT FLAT ENOUGH")
-                print("sin(x):", np.sin(x), "|| sin(y)", np.sin(y))
-                self.not_found = True
-                return
-
-            if hasattr(self, "tag_offsets"):
-                z += self.tag_offsets[marker.id]
-
-            state[0] = marker.pose.pose.position.x
-            state[1] = marker.pose.pose.position.y
-            state[2] = z % (2 * np.pi)
-            state[3] = marker.id
-        
-        self.not_found = not np.all(found_robots)
-        self.n_updates += 0 if self.not_found else 1
-
-    def get_states(self, perturb=False, wait=True):
-        if perturb:
-            if self.perturb_count >= self.max_perturb_count:
-                print("\n\nRobot hit boundary!\n\n")
-                self.save_data(clip_end=True)
-                self.done = True
-                return
-
-            if self.not_found:
-                print("PERTURBING")
-                
-                for i, proxy in enumerate(self.service_proxies):
-                    proxy(self.perturb_request, f'kami{i+1}')
-
-                rospy.sleep(0.1)
-                self.perturb_count += 1
-                return
-            
-        self.perturb_count = 0
-
-        if self.n_avg_states > 1:
-            current_states = []
-            while len(current_states) < self.n_avg_states:
-                if wait and self.n_updates == self.last_n_updates:
-                    rospy.sleep(0.0001)
-                    continue
-                self.last_n_updates = self.n_updates
-                current_states.append(self.current_states.copy())
-            
-            current_states = np.array(current_states).squeeze()
-            
-            keepdims = (len(current_states.shape) == 2)
-            current_states = current_states.mean(axis=0, keepdims=keepdims)
-
-            return current_states
+                to_object_heading_cost = torch.abs(to_object_heading_cost)
+                to_object_heading_cost = to_object_heading_cost.mean(dim=0)
         else:
-            while wait and self.n_updates == self.last_n_updates:
-                rospy.sleep(0.0001)
-            self.last_n_updates = self.n_updates
+            to_object_heading_cost = torch.tensor([0.])
 
-            return self.current_states.copy()
+        # goal-object-robot angle
+        if self.use_object:
+            robot_xy = robot_states[..., :2]
 
-    def save_training_data(self, clip_end=False):
-        states = np.array(self.states)
-        actions = np.array(self.actions)
-        next_states = np.array(self.next_states)
-        
-        length = min(len(states), len(actions), len(next_states))
-        states = states[:length]
-        actions = actions[:length]
-        next_states = next_states[:length]
+            object_xy = object_state[..., :2]
+            goal_xy = goals[..., :2]
 
-        if not os.path.exists(self.save_path):
-            print("Creating new data!")
-            np.savez_compressed(self.save_path, states=states, actions=actions, next_states=next_states)
+            a = torch.norm(object_xy - robot_xy, dim=-1)
+            b = torch.norm(goal_xy - object_xy, dim=-1)
+            c = torch.norm(goal_xy - robot_xy, dim=-1)
+
+            goal_object_robot_angle_cost_per_robot = torch.abs(torch.pi - torch.arccos((a**2 + b**2 - c**2) / (2 * a * b + 1e-6)))
+            goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.mean(dim=0)
+            # goal_object_robot_angle_cost[dist_cost < 0.03] = 0.
+            # goal_object_robot_angle_cost[goal_object_robot_angle_cost < torch.pi / 6.] = 0.
         else:
-            print("\nAppending new data to old data!")
-            data = np.load(self.save_path)
-            old_states = np.copy(data["states"])
-            old_actions = np.copy(data["actions"])
-            old_next_states = np.copy(data["next_states"])
-            if all(len(old) != 0 for old in [old_states, old_actions, old_next_states]):
-                states = np.append(old_states, states, axis=0)
-                actions = np.append(old_actions, actions, axis=0)
-                next_states = np.append(old_next_states, next_states, axis=0)
-            
-            # ignore last few transitions in case of uncertain ending
-            if clip_end:
-                states = states[:-self.n_clip]
-                actions = actions[:-self.n_clip]
-                next_states = next_states[:-self.n_clip]
-                if len(states) + len(actions) + len(next_states) == 0:
-                    print("skipping this save!")
-                    return
-                    
-            np.savez_compressed(self.save_path, states=states, actions=actions, next_states=next_states)
+            goal_object_robot_angle_cost = torch.tensor([0.])
 
-        print(f"Collected {len(states)} transitions in total!")
-        self.states = []
-        self.actions = []
-        self.next_states = []
+        cost_dict = {
+            "distance": dist_cost,
+            "distance_bonus": dist_bonus,
+            "heading": heading_cost,
+            "target_heading": target_heading_cost,
+            "separation": sep_cost,
+            "heading_difference": heading_diff_cost,
+            "action_norm": norm_cost,
+            "to_object_heading": to_object_heading_cost,
+            "goal_object_robot_angle": goal_object_robot_angle_cost,
+            "realistic": realistic_cost,
+            "object_delta": object_xy_delta_cost,
+        }
 
-    def get_new_pwm(self, pwm, before, after):
-        positive = (pwm > 0)
-        abs_pwm = abs(pwm)
-        if abs_pwm < before:
-            new_abs_pwm = abs_pwm * after / before
-        else:
-            new_abs_pwm = (abs_pwm - before) / before * (1 - after) + after
-        new_pwm = new_abs_pwm * (positive * 2 - 1)
-        return np.clip(new_pwm, *self.action_range[:, 0])
-
-    def remap_cmd(self, cmd, robot):
-        if self.remap:
-            left_pwm, right_pwm = cmd.left_pwm, cmd.right_pwm
-            if robot == 0:
-                before_left = 0.5
-                after_left = 0.8
-                before_right = 0.7
-                after_right = 0.4
-            elif robot == 2:
-                before_left = 0.3
-                after_left = 0.6
-                before_right = 0.6
-                after_right = 0.9
-            else:
-                raise ValueError
-
-            cmd.left_pwm = self.get_new_pwm(left_pwm, before_left, after_left)
-            cmd.right_pwm = self.get_new_pwm(right_pwm, before_right, after_right)
-        return cmd
+        return cost_dict
