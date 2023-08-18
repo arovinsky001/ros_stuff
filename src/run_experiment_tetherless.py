@@ -39,7 +39,7 @@ class Experiment:
         far_params["mpc_horizon"] = 3
         far_params["mpc_samples"] = 200
         far_params["gamma"] = 20.
-        far_params["refine_iters"] = 3.
+        far_params["refine_iters"] = 3
         far_params["n_best"] = 20
 
         if self.mpc_method == 'mppi':
@@ -53,12 +53,6 @@ class Experiment:
 
         print('creating environment')
         self.env = Environment(robot_pos_dict, robot_vel_dict, object_pos, object_vel, corner_pos, action_receipt_dict, params)
-
-        # if not self.debug:
-        #     rospy.sleep(1)
-        #     for _ in trange(5, desc="Warmup Steps"):
-        #         random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
-        #         self.env.step(random_max_action)
 
         self.close_agent = self.agent_class(params)
         self.close_replay_buffer = ReplayBuffer(params)
@@ -75,6 +69,7 @@ class Experiment:
             # idx = np.where(np.all(np.diff(states, axis=0) == 0., axis=1))[0] + 1
             # idx = [3858, 3859, 3860]
             # idx = [-1, -2]
+            # idx = np.arange(-200, 0)
             # if len(idx) > 0:
             #     print(f"REMOVING {len(idx)} FAULTY TRANSITIONS")
             #     states, actions, next_states = np.delete(states, idx, axis=0), np.delete(actions, idx, axis=0), np.delete(next_states, idx, axis=0)
@@ -159,13 +154,6 @@ class Experiment:
         return self.params[key]
 
     def run(self):
-        # warmup robot before running actual experiment
-        # if not self.debug:
-        #     rospy.sleep(1)
-        #     for _ in trange(5, desc="Warmup Steps"):
-        #         random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
-        #         self.env.step(random_max_action)
-
         # state = self.env.reset(self.agent, self.replay_buffer)
         state = self.env.get_state()
         done = False
@@ -303,10 +291,6 @@ class Experiment:
                     rospy.signal_shutdown(f"Experiment finished! Did {self.n_episodes} rollouts.")
                     return
 
-                for _ in trange(3, desc="Warmup Steps"):
-                    random_max_action = np.random.choice([0.999, -0.999], size=2*self.n_robots)
-                    self.env.step(random_max_action)
-
                 # state = self.env.reset(self.agent, self.replay_buffer)
                 self.env.episode_states = []
                 self.env.camera_imgs = []
@@ -416,7 +400,8 @@ if __name__ == '__main__':
     parser.add_argument('-buffer_train_capacity', type=int, default=100)
     parser.add_argument('-buffer_save_dir', type=str, default='~/kamigami_data/replay_buffers/online_buffers/')
     parser.add_argument('-buffer_restore_dir', type=str, default='~/kamigami_data/replay_buffers/meshgrid_buffers/')
-    parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration04_0803.npz')
+    parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration04_0805.npz')
+    # parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration04_0803.npz')
     # parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration04_0721.npz')
     # parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration04_0706.npz')
     # parser.add_argument('-close_buffer_restore_path', type=str, default='~/kamigami_data/replay_buffers/online_buffers/2object_tetherless_duration03_0628.npz')
@@ -425,6 +410,8 @@ if __name__ == '__main__':
 
     parser.add_argument('-cost_distance_weight', type=float, default=1.)
     parser.add_argument('-cost_distance_bonus_weight', type=float, default=1.)
+    parser.add_argument('-cost_distance_penalty_weight', type=float, default=1.)
+    parser.add_argument('-cost_big_distance_penalty_weight', type=float, default=1.)
     parser.add_argument('-cost_separation_weight', type=float, default=1.)
     parser.add_argument('-cost_std_weight', type=float, default=1.)
     parser.add_argument('-cost_goal_angle_weight', type=float, default=1.)
@@ -443,3 +430,14 @@ if __name__ == '__main__':
 # rosrun ros_stuff run_experiment_tetherless.py -mpc_method=cem -alpha=0.8 -n_best=20 -refine_iters=3 -n_episodes=1000 -tolerance=0.04 -mpc_horizon=3 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=0.8 -noise_std=0.9 -update_online -exp_name=2object_tetherless_duration04_0721 -pretrain_samples=36 -use_object -close_radius=0.5 -record_video -discount_factor=0.99 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=3 -cost_distance_weight=1.2 -cost_distance_bonus_weight=0. -cost_separation_weight=0.1 -cost_std_weight=1.3 -cost_goal_angle_weight=0.05 -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=130. -sample_recent_ratio=0.5 -load_agent
 
 # rosrun ros_stuff run_experiment_tetherless.py -mpc_method=cem -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=0.7 -noise_std=0.9 -exp_name=2object_tetherless_duration04_0803 -pretrain_samples=36 -use_object -close_radius=0.55 -record_video -discount_factor=0.99 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=250 -batch_size=500 -utd_ratio=10 -cost_distance_weight=1. -cost_distance_bonus_weight=0. -cost_separation_weight=0.07 -cost_std_weight=0.03 -cost_goal_angle_weight=0. -cost_realistic_weight=1. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=10. -sample_recent_ratio=0.5 -load_agent
+
+# rosrun ros_stuff run_experiment_tetherless.py -mpc_method=mppi -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=1. -noise_std=0.9 -exp_name=2object_tetherless_duration04_0805 -pretrain_samples=36 -use_object -close_radius=10. -record_video -discount_factor=0.98 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=10 -cost_distance_weight=100. -cost_distance_bonus_weight=0. -cost_distance_penalty_weight=10. -cost_big_distance_penalty_weight=20. -cost_separation_weight=5. -cost_std_weight=0.1 -cost_goal_angle_weight=0. -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=25. -sample_recent_ratio=0.5 -load_agent
+# roslaunch ros_stuff webcam_track.launch video_device:="/dev/video0" image_width:=1920 image_height:=1080 marker_size:=12 output_frame:=usb_cam max_new_marker_error:=0.01 max_track_error:=0.01 object_id:=3 framerate:=30 robot_ids:=[0,2] max_frequency:=30
+
+# rosrun ros_stuff run_experiment_tetherless.py -mpc_method=mppi -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=1. -noise_std=0.9 -exp_name=2object_tetherless_duration04_0805 -pretrain_samples=36 -use_object -close_radius=10. -record_video -discount_factor=0.98 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=10 -cost_distance_weight=100. -cost_distance_bonus_weight=0. -cost_distance_penalty_weight=0. -cost_big_distance_penalty_weight=10. -cost_separation_weight=5. -cost_std_weight=0.1 -cost_goal_angle_weight=0. -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=12. -sample_recent_ratio=0.5 -load_agent
+
+# rosrun ros_stuff run_experiment_tetherless.py -mpc_method=mppi -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=1. -noise_std=0.9 -exp_name=2object_tetherless_duration04_0805 -pretrain_samples=36 -use_object -close_radius=10. -record_video -discount_factor=0.98 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=10 -cost_distance_weight=1. -cost_distance_bonus_weight=0. -cost_distance_penalty_weight=0. -cost_big_distance_penalty_weight=0. -cost_separation_weight=0. -cost_std_weight=0. -cost_goal_angle_weight=0. -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=8. -sample_recent_ratio=0.5 -load_agent
+
+# rosrun ros_stuff run_experiment_tetherless.py -mpc_method=mppi -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=500 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=0.6 -noise_std=0.9 -exp_name=2object_tetherless_duration04_0805 -pretrain_samples=36 -use_object -close_radius=10. -record_video -discount_factor=0.98 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=10 -cost_distance_weight=1. -cost_distance_bonus_weight=0. -cost_distance_penalty_weight=0. -cost_big_distance_penalty_weight=0. -cost_separation_weight=0. -cost_std_weight=0. -cost_goal_angle_weight=0. -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=8. -sample_recent_ratio=0.5 -load_agent
+
+# rosrun ros_stuff run_experiment_tetherless.py -mpc_method=mppi -alpha=0.8 -n_best=20 -refine_iters=5 -n_episodes=1 -tolerance=0.04 -mpc_horizon=7 -mpc_samples=200 -hidden_dim=500 -hidden_depth=3 -scale -buffer_capacity=50000 -robot_ids 0 2 -object_id=3 -trajectory=S -beta=1. -noise_std=0.9 -exp_name=2object_tetherless_duration04_0805 -pretrain_samples=36 -use_object -close_radius=10. -record_video -discount_factor=0.98 -pretrain_close_agent -episode_length=100 -lr=1e-3 -train_epochs=200 -batch_size=500 -utd_ratio=10 -cost_distance_weight=100. -cost_distance_bonus_weight=0. -cost_distance_penalty_weight=0. -cost_big_distance_penalty_weight=0. -cost_separation_weight=50. -cost_std_weight=1. -cost_goal_angle_weight=0. -cost_realistic_weight=0. -cost_action_weight=0. -cost_to_object_heading_weight=0. -cost_object_delta_weight=0. -dist -ensemble_size=3 -gamma=30. -sample_recent_ratio=0.5 -load_agent
