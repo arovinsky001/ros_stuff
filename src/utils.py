@@ -56,7 +56,7 @@ def rotate_vectors(vectors, angle):
     sin, cos = sin_cos(angle)
     rotation = torch.stack((torch.stack((cos, -sin)),
                             torch.stack((sin, cos)))).permute(2, 0, 1)
-    rotated_vector = (rotation @ vectors[:, :, None]).squeeze(dim=-1)
+    rotated_vector = (rotation @ vectors[..., None]).squeeze(dim=-1)
     return rotated_vector
 
 class SetParamsAsAttributes:
@@ -220,6 +220,13 @@ class DataUtils:
 
 
     def cost_dict(self, state, action, goals, initial_state, robot_goals=False, signed=False):
+        dist_bonus_thresh = 0.03
+        dist_penalty_thresh = 0.05
+        big_dist_penalty_thresh = 0.1
+        sep_cost_thresh = 0.4
+        realistic_cost_thresh = 0.14
+        goal_object_robot_angle_thresh_deg = 60.
+
         initial_state, action, goals = as_tensor(initial_state, action, goals)
         state_dim = 3
         if self.use_object:
@@ -238,7 +245,17 @@ class DataUtils:
             dist_cost *= forward
 
         # bonus for being very close to the goal
-        dist_bonus = (torch.abs(dist_cost) < 0.01) * -1
+        dist_bonus = torch.zeros_like(dist_cost)
+        dist_bonus[dist_cost.abs() < dist_bonus_thresh] = -1.
+        # dist_bonus = (torch.abs(dist_cost) < 0.01) * -1
+
+        # penalty for being far from the goal
+        dist_penalty = torch.zeros_like(dist_cost)
+        dist_penalty[dist_cost.abs() > dist_penalty_thresh] = 1.
+
+        # penalty for being very far from the goal
+        big_dist_penalty = torch.zeros_like(dist_cost)
+        big_dist_penalty[dist_cost.abs() > big_dist_penalty_thresh] = 1.
 
         # difference between current and toward-goal heading
         current_angle = effective_state[..., 2]
@@ -282,23 +299,27 @@ class DataUtils:
         if self.use_object:
             object_to_robot_xy = (object_state - robot_states)[..., :-1]
             object_to_robot_dist = torch.norm(object_to_robot_xy, dim=-1)
-            # object_to_robot_dist[object_to_robot_dist > 0.24] *= 3.
-            sep_cost = object_to_robot_dist.mean(dim=0)
-            # sep_cost = object_to_robot_dist.max(dim=0)[0]
+
+            max_object_to_robot_dist = object_to_robot_dist.max(dim=0)[0]
+            sep_cost = torch.zeros_like(max_object_to_robot_dist)
+            # sep_cost = object_to_robot_dist.mean(dim=0)
+            sep_cost[max_object_to_robot_dist > sep_cost_thresh] = 1.
         else:
             sep_cost = torch.tensor([0.])
 
         # realistic distance
         # separation distance between each robot and the distance between object and robots
         if self.use_object:
-            thresh = 0.14
-
             object_to_robot_dist = torch.norm((object_state - robot_states)[..., :-1], dim=-1)
             robot_to_robot_dist = torch.norm((robot_states[0] - robot_states[1])[..., :-1], dim=-1)
             all_dists = torch.cat((object_to_robot_dist, robot_to_robot_dist[None, ...]), dim=0)
-            all_dists = torch.clip(all_dists, 0., thresh)
 
-            realistic_cost = (thresh - all_dists).mean(dim=0)
+            # all_dists = torch.clip(all_dists, 0., realistic_cost_thresh)
+            # realistic_cost = (realistic_cost_thresh - all_dists).mean(dim=0)
+
+            min_dists = all_dists.min(dim=0)[0]
+            realistic_cost = torch.zeros_like(min_dists, dtype=torch.float)
+            realistic_cost[min_dists < realistic_cost_thresh] = 1.
         else:
             realistic_cost = torch.tensor([0.])
 
@@ -353,12 +374,32 @@ class DataUtils:
             goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.mean(dim=0)
             # goal_object_robot_angle_cost[dist_cost < 0.03] = 0.
             # goal_object_robot_angle_cost[goal_object_robot_angle_cost < torch.pi / 6.] = 0.
+
+            # max_goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.max(dim=0)[0]
+            # goal_object_robot_angle_cost = torch.zeros_like(max_goal_object_robot_angle_cost, dtype=torch.float)
+            # goal_object_robot_angle_cost[max_goal_object_robot_angle_cost > goal_object_robot_angle_thresh_deg * torch.pi / 180.] = 1.
         else:
             goal_object_robot_angle_cost = torch.tensor([0.])
+
+        # print("\n\n", dist_cost[:, :, 0].mean(), "\n")
+
+        # print("\n\n", dist_bonus[:, :, 0].mean(), "|", dist_penalty[:, :, 0].mean(), "\n")
+
+        # print("\n\n", sep_cost[:, :, 0].mean(), "\n")
+
+        # print(f'\n\ngoal_obj_robot_angle 0: {goal_object_robot_angle_cost_per_robot[0, :, :, 0].mean() * 180. / torch.pi}')
+        # print(f'goal_obj_robot_angle 2: {goal_object_robot_angle_cost_per_robot[1, :, :, 0].mean() * 180. / torch.pi}\n')
+
+        # import time
+        # time.sleep(2.)
+
+        dist_cost = dist_cost ** 2
 
         cost_dict = {
             "distance": dist_cost,
             "distance_bonus": dist_bonus,
+            "distance_penalty": dist_penalty,
+            "big_distance_penalty": big_dist_penalty,
             "heading": heading_cost,
             "target_heading": target_heading_cost,
             "separation": sep_cost,
