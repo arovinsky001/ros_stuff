@@ -28,6 +28,10 @@ class StatePublisher:
 
         self.not_found = False
 
+        self.all_obj_states = np.empty((50, 3), dtype=np.float)
+        self.all_obj_idx = 0
+        self.full = False
+
         rospy.init_node("state_publisher")
 
         print("setting up tf buffer/listener")
@@ -107,6 +111,19 @@ class StatePublisher:
 
         self.publisher.publish(pub_msg)
 
+        # self.all_obj_states[self.all_obj_idx] = self.id_to_state[self.object_id].copy()
+        # self.all_obj_states[self.all_obj_idx] = velocities[self.object_id].copy()
+        # self.all_obj_idx = (self.all_obj_idx + 1) % 50
+        # if self.all_obj_idx == 0:
+        #     self.full = True
+        # print(f"{self.all_obj_idx if not self.full else 'FULL'}")
+        # if self.full:
+        #     print("MEAN:", self.all_obj_states.mean(axis=0))
+        #     print("STD:", self.all_obj_states.std(axis=0), '\n')
+        # else:
+        #     print("MEAN:", self.all_obj_states[:self.all_obj_idx].mean(axis=0))
+        #     print("STD:", self.all_obj_states[:self.all_obj_idx].std(axis=0), '\n')
+
     def compute_vel_from_past_states(self):
         velocities = {}
         eps = 1e-8
@@ -125,7 +142,7 @@ class StatePublisher:
             v1 = v1[:-1] / (v1[-1] + eps)
             v2 = v2[:-1] / (v2[-1] + eps)
             v3 = v3[:-1] / (v3[-1] + eps)
-            velocities[id] = ((v1 + v2 + v3) / 3)
+            velocities[id] = ((v1 + v2 + v3) / 3.)
 
         return velocities
 
