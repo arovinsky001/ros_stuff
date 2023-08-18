@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import os
+import time
 import numpy as np
 
 import rospy
@@ -21,7 +22,7 @@ class Environment:
         self.action_duration = 0.4 if self.use_object else 0.4
 
         self.episode_step = 0
-        self.reverse_episode = True
+        self.reverse_episode = False
         self.original_episode_length = self.episode_length
 
         self.robot_pos_dict = robot_pos_dict
@@ -39,17 +40,17 @@ class Environment:
 
         if not calibrate and not precollecting:
             self.camera_img_subscriber = rospy.Subscriber("/usb_cam/image_raw", Image, self.image_callback, queue_size=1)
-            rospy.sleep(0.5)        # wait for states to be published and set
+            rospy.sleep(0.3)        # wait for states to be published and set
 
             if self.trajectory == "S":
                 self.goal_fn = trajectories.S_trajectory
-                self.goals = self.goal_fn(self.episode_length, self.mpc_horizon)
+                self.goals = self.goal_fn(self.episode_length, self.mpc_horizon, reverse=self.reverse_episode)
             elif self.trajectory == "W":
                 self.goal_fn = trajectories.W_trajectory
-                self.goals, self.episode_length = self.goal_fn(self.episode_length, self.mpc_horizon)
+                self.goals, self.episode_length = self.goal_fn(self.episode_length, self.mpc_horizon, reverse=self.reverse_episode)
             elif self.trajectory == "8":
                 self.goal_fn = trajectories.figure8_trajectory
-                self.goals = self.goal_fn(self.episode_length, self.mpc_horizon)
+                self.goals = self.goal_fn(self.episode_length, self.mpc_horizon, reverse=self.reverse_episode)
             else:
                 raise ValueError
 
@@ -84,9 +85,11 @@ class Environment:
 
         rospy.sleep(self.action_duration)
 
-        thresholds = np.array([0.018, 0.03, 0.04])
+        thresholds = np.array([0.015] * (self.n_robots + self.use_object))
+        # t = time.time()
         while not np.all(np.abs(self.get_all_velocities()) < thresholds):
-            rospy.sleep(0.04)
+            rospy.sleep(0.01)
+        # print("WAIT TIME:", time.time() - t, "s")
 
         for id in self.action_receipt_dict:
             self.action_receipt_dict[id] = False
