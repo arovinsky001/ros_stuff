@@ -163,7 +163,7 @@ def train(agent, train_state, train_action, train_next_state, epochs=5, batch_si
     else:
         n_val = 0
 
-    for _, model in enumerate(agent.models):
+    for model_idx, model in enumerate(agent.models):
         if not agent.validation:
             rand_idx = torch.randperm(len(og_train_state))
             train_state, train_action, train_next_state = og_train_state[rand_idx], og_train_action[rand_idx], og_train_next_state[rand_idx]
@@ -196,7 +196,7 @@ def train(agent, train_state, train_action, train_next_state, epochs=5, batch_si
         test_losses.append(dcn(test_loss_mean))
         tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
 
-        print("\n\nTRAINING MODEL\n")
+        print(f"\n\nTRAINING MODEL {model_idx}\n")
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
             # train
             if meta:
