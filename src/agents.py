@@ -7,7 +7,7 @@ import torch
 
 from replay_buffer import STATE_DIM, ACTION_DIM
 from dynamics_network import DynamicsNetwork
-from utils import DataUtils
+from utils import DataUtils, as_tensor
 
 
 class MPCAgent:
@@ -52,23 +52,57 @@ class MPCAgent:
         self.save_paths = [self.state_dict_save_dir + f"robot_{'_'.join([str(id) for id in self.robot_ids])}_object_{self.use_object}_state_dict_{i}.pt" for i in range(self.ensemble_size)]
         self.scale_idx_path = self.state_dict_save_dir + f"robot_{'_'.join([str(id) for id in self.robot_ids])}_object_{self.use_object}_scale_idx_.npy"
 
+        self.n_particles = 20
+        assert self.n_particles % self.ensemble_size == 0
+
     def __getattr__(self, key):
         return self.params[key]
 
     def simulate(self, initial_state, action_sequence):
+        initial_state, action_sequence = as_tensor(initial_state, action_sequence)
         mpc_samples, mpc_horizon = action_sequence.shape[0], action_sequence.shape[1]
-        initial_state = torch.tile(torch.tensor(initial_state, dtype=torch.float), (mpc_samples, 1))
-        pred_state_sequence = torch.empty((len(self.models), mpc_samples, mpc_horizon, self.state_dim))
+        # initial_state = torch.tile(initial_state, (mpc_samples, self.n_particles // self.ensemble_size, 1))
+        initial_state = torch.tile(initial_state, (self.ensemble_size, mpc_samples, self.n_particles // self.ensemble_size, 1))
+        pred_state_sequence = torch.empty((self.ensemble_size, mpc_samples, self.n_particles // self.ensemble_size, mpc_horizon, self.state_dim))
 
-        for i, model in enumerate(self.models):
+        for model in self.models:
             model.eval()
 
-            for t in range(mpc_horizon):
-                action = action_sequence[:, t]
-                state = initial_state if t == 0 else pred_state_sequence[i, :, t-1]
+        for t in range(mpc_horizon):
+            action = torch.tile(action_sequence[:, t], (1, self.n_particles // self.ensemble_size)).reshape(mpc_samples * self.n_particles // self.ensemble_size, self.action_dim)
+            state = initial_state if t == 0 else pred_state_sequence[:, :, :, t-1]
+            state = state.transpose(0, 1).reshape(mpc_samples, self.n_particles, self.state_dim)
 
-                with torch.no_grad():
-                    pred_state_sequence[i, :, t] = model(state, action, sample=False, delta=False)
+            sort_idx = torch.rand(mpc_samples, self.n_particles).argsort(dim=-1).reshape(-1)
+            arange = torch.tile(torch.arange(mpc_samples)[:, None], (1, self.n_particles)).reshape(-1)
+
+            original_idx = torch.tile(torch.arange(self.n_particles)[None, :], (mpc_samples, 1))
+            unsort_idx = original_idx[arange, sort_idx].reshape(mpc_samples, self.n_particles).argsort(dim=-1).reshape(-1)
+
+            state = state[arange, sort_idx].reshape(mpc_samples, self.n_particles, self.state_dim)
+
+            pred_next_states = torch.empty(mpc_samples, self.n_particles, self.state_dim)
+
+            with torch.no_grad():
+                for i, model in enumerate(self.models):
+                    start, end = i*(self.n_particles // self.ensemble_size), (i+1)*(self.n_particles // self.ensemble_size)
+                    cur_state = state[:, start:end]
+                    cur_state = cur_state.reshape(mpc_samples * self.n_particles // self.ensemble_size, self.state_dim)
+                    pred_next_states[:, start:end] = model(cur_state, action, sample=True, delta=False).reshape(mpc_samples, self.n_particles // self.ensemble_size, self.state_dim)
+
+                pred_state_sequence[:, :, :, t] = pred_next_states[arange, unsort_idx].reshape(mpc_samples, self.ensemble_size, self.n_particles // self.ensemble_size, self.state_dim).transpose(0, 1)
+
+        # for i, model in enumerate(self.models):
+        #     model.eval()
+
+        #     for t in range(mpc_horizon):
+        #         action = torch.tile(action_sequence[:, t], (1, self.n_particles // self.ensemble_size)).reshape(mpc_samples * self.n_particles // self.ensemble_size, self.action_dim)
+        #         state = initial_state if t == 0 else pred_state_sequence[i, :, :, t-1]
+        #         state = state.reshape(mpc_samples * self.n_particles // self.ensemble_size, self.state_dim)
+
+        #         with torch.no_grad():
+        #             # Note: sample to be true
+        #             pred_state_sequence[i, :, :, t] = model(state, action, sample=True, delta=False).reshape(mpc_samples, self.n_particles // self.ensemble_size, self.state_dim)
 
         if torch.any(torch.isnan(pred_state_sequence) | torch.isinf(pred_state_sequence)):
             import pdb;pdb.set_trace()
@@ -76,34 +110,32 @@ class MPCAgent:
         return pred_state_sequence
 
     def compute_trajectory_costs(self, predicted_state_sequence, sampled_actions, goals, initial_state):
-        cost_dict = self.dtu.cost_dict(predicted_state_sequence, sampled_actions, goals, initial_state, robot_goals=self.robot_goals)
+        with torch.no_grad():
+            cost_dict = self.dtu.cost_dict(predicted_state_sequence, sampled_actions, goals, initial_state, robot_goals=self.robot_goals)
 
-        ensemble_costs_per_step = torch.zeros((self.ensemble_size, self.mpc_samples, self.mpc_horizon))
+        ensemble_costs_per_step = torch.zeros((self.ensemble_size, self.mpc_samples, self.n_particles // self.ensemble_size, self.mpc_horizon))
         for cost_type, cost_weight in self.cost_weights_dict.items():
-            # if cost_type != 'distance':
-            ensemble_costs_per_step += cost_dict[cost_type] * cost_weight
-
-        # ensemble_costs_per_step = cost_dict['distance'] * (ensemble_costs_per_step + self.cost_weights_dict['distance'])
-
-        if self.use_object:
-            # ensemble_costs_per_step (ens_size, mpc_samples, mpc_horizon) -> ensemble_costs_std (mpc_samples, mpc_horizon)
-            ensemble_costs_std = ensemble_costs_per_step.std(axis=0)
-            ensemble_costs_per_step += ensemble_costs_std * self.cost_std_weight
-
-        discount = self.discount_factor ** torch.arange(self.mpc_horizon)
-        ensemble_costs_per_step *= discount[None, None, :]
-
-        # average over ensemble and horizon dimensions to get per-sample cost
-        # ensemble_costs_per_step (ens_size, mpc_samples, mpc_horizon) -> ensemble_costs_per_sample (ens_size, mpc_samples)
-        ensemble_costs_per_sample = ensemble_costs_per_step.mean(axis=2)
-
-        # ensemble_costs_per_sample (ens_size, mpc_samples) -> costs_per_sample (mpc_samples)
-        costs_per_sample = ensemble_costs_per_sample.mean(axis=0)
+            if cost_weight != 0.:
+                ensemble_costs_per_step += cost_dict[cost_type] * cost_weight
 
         # if self.use_object:
-        #     # ensemble_costs_per_sample (ens_size, mpc_samples) -> costs_std (mpc_samples)
-        #     costs_std = ensemble_costs_per_sample.std(axis=0)
-        #     costs_per_sample += costs_std * self.cost_std_weight
+        #     # ensemble_costs_per_step (ens_size, mpc_samples, n_particles / ens_size, mpc_horizon) -> ensemble_costs_std (mpc_samples, mpc_horizon)
+        #     ensemble_costs_std = ensemble_costs_per_step.std(dim=(0, 2))
+        #     ensemble_costs_per_step += ensemble_costs_std[:, None, :] * self.cost_std_weight
+
+        discount = self.discount_factor ** torch.arange(self.mpc_horizon)
+        ensemble_costs_per_step *= discount[None, None, None, :]
+
+        # average over ensemble and horizon dimensions to get per-sample cost
+        # ensemble_costs_per_step (ens_size, mpc_samples, n_particles / ens_size, mpc_horizon) -> ensemble_costs_per_sample (ens_size, mpc_samples, n_particles / ens_size)
+        ensemble_costs_per_sample = ensemble_costs_per_step.mean(dim=3)
+
+        # ensemble_costs_per_sample (ens_size, mpc_samples, n_particles / ens_size) -> costs_per_sample (mpc_samples)
+        costs_per_sample = ensemble_costs_per_sample.mean(dim=(0, 2))
+
+        if self.use_object:
+            ensemble_costs_std = ensemble_costs_per_sample.std(dim=(0, 2))
+            costs_per_sample += ensemble_costs_std * self.cost_std_weight
 
         # print("\nCOSTS STD:", costs_per_sample.std())
         # power = 0.1
@@ -175,8 +207,9 @@ class CEMAgent(MPCAgent):
 
     def get_action(self, initial_state, goals):
         trajectory_mean = np.zeros((self.mpc_horizon, self.action_dim))
+        # trajectory_mean = np.random.uniform(-1., 1., (self.mpc_horizon, self.action_dim))
         trajectory_std = np.zeros((self.mpc_horizon, self.action_dim))
-        sampled_actions = np.random.uniform(-1, 1, size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
+        sampled_actions = np.random.uniform(-1., 1., size=(self.mpc_samples, self.mpc_horizon, self.action_dim))
 
         for i in range(self.refine_iters):
             if i > 0:
@@ -194,11 +227,12 @@ class CEMAgent(MPCAgent):
             trajectory_mean = self.alpha * best_trajectories_mean + (1 - self.alpha) * trajectory_mean
             trajectory_std = self.alpha * best_trajectories_std + (1 - self.alpha) * trajectory_std
 
+            # print(trajectory_std.max())
             if trajectory_std.max() < 0.02:
                 break
 
         best_action = trajectory_mean[0]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze().detach().cpu().numpy()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze().mean(dim=(0, 1)).detach().cpu().numpy()
 
         return best_action, predicted_next_state
 
@@ -228,12 +262,16 @@ class MPPIAgent(MPCAgent):
         total_costs = self.compute_trajectory_costs(predicted_state_sequence, sampled_actions, goals, initial_state)
         total_rewards = -total_costs
 
+        # best_rewards_idx = total_rewards.argsort()[-int(0.3*self.mpc_samples):]
+        # total_rewards = total_rewards[best_rewards_idx]
+        # sampled_actions = sampled_actions[best_rewards_idx]
+
         weights = np.exp(self.gamma * (total_rewards - total_rewards.max()))
         weighted_trajectories = (weights[:, None, None] * sampled_actions).sum(axis=0)
         self.trajectory_mean = weighted_trajectories / (weights.sum() + 1e-10)
 
         best_action = self.trajectory_mean[0]
-        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).mean(axis=0).squeeze().detach().cpu().numpy()
+        predicted_next_state = self.simulate(initial_state, best_action[None, None, :]).squeeze().mean(dim=(0, 1)).detach().cpu().numpy()
 
         # print('\n')
         # gammas = [0.1, 0.5, 1., 2., 3., 5.]
