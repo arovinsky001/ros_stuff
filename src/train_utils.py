@@ -20,6 +20,10 @@ def train_from_buffer(agent, replay_buffer, pretrain_samples=500, train_epochs=1
     actions = replay_buffer.actions[:n_samples]
     next_states = replay_buffer.next_states[:n_samples]
 
+    # if agent.use_object:
+    #     n = 12000
+    #     states, actions, next_states = states[:n], actions[:n], next_states[:n]
+
     if set_scale_only:
         for model in agent.models:
             states, actions, next_states = states[:agent.scale_idx], actions[:agent.scale_idx], next_states[:agent.scale_idx]
@@ -119,29 +123,36 @@ def train_from_buffer(agent, replay_buffer, pretrain_samples=500, train_epochs=1
         print("\nMEAN TRAIN PRED STD:", train_pred_std.mean())
         print("MEAN VAL PRED STD:", val_pred_std.mean())
 
-        import pdb;pdb.set_trace()
-
+        # import pdb;pdb.set_trace()
 
     if agent.training_plot:
-        fig, axes = plt.subplots(1, 4)
-        axes[0].plot(np.arange(len(training_losses)), training_losses, label="Training Loss")
-        axes[1].plot(np.arange(-1, len(test_losses)-1), test_losses, label="Test Loss")
+        fig, axes = plt.subplots(1, 2)
 
-        axes[0].set_yscale('log')
-        axes[1].set_yscale('log')
+        for ax in axes:
+            ax.grid()
+            if not agent.dist:
+                ax.set_yscale('log')
+
+        if agent.dist:
+            plot_training_losses = training_losses
+            plot_test_losses = test_losses
+        else:
+            plot_training_losses = training_losses - training_losses.min() + 1e-3
+            plot_test_losses = test_losses - test_losses.min() + 1e-3
+
+        axes[0].plot(np.arange(len(training_losses)), plot_training_losses)
+        axes[1].plot(np.arange(-1, len(test_losses)-1), plot_test_losses)
 
         axes[0].set_title('Training Loss')
         axes[1].set_title('Test Loss')
 
-        for ax in axes:
-            ax.grid()
-
         axes[0].set_ylabel('Loss')
         axes[1].set_xlabel('Epoch')
-        fig.set_size_inches(12, 3.5)
 
+        fig.set_size_inches(12, 3.5)
         plt.show()
 
+        import pdb;pdb.set_trace()
 
 def train(agent, train_state, train_action, train_next_state, epochs=5, batch_size=256, set_scalers=False, meta=False, close_agent=False):
     train_state, train_action, train_next_state = as_tensor(train_state, train_action, train_next_state)
@@ -185,16 +196,21 @@ def train(agent, train_state, train_action, train_next_state, epochs=5, batch_si
                 n_batches -= 1
         # n_batches = max(1, int(np.floor(len(train_state) / batch_size)))
 
-        def validation_loss():
+        def evaluate():
             with torch.no_grad():
                 model.eval()
-                pred_state_delta = model(val_state, val_action, sample=False, delta=True)
-                test_loss_mean = F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')
-            return test_loss_mean
 
-        test_loss_mean = validation_loss()
-        test_losses.append(dcn(test_loss_mean))
-        tqdm.write(f"Pre-Train: mean test loss: {test_loss_mean}")
+                if agent.dist:
+                    pred_state_delta_dist = model(val_state, val_action, ret_dist=True)
+                    test_loss_mean = -pred_state_delta_dist.log_prob(val_state_delta).mean()
+                else:
+                    pred_state_delta = model(val_state, val_action, sample=False, delta=True)
+                    test_loss_mean = F.mse_loss(pred_state_delta, val_state_delta, reduction='mean')
+
+            test_losses.append(dcn(test_loss_mean))
+
+        evaluate()
+        tqdm.write(f"Pre-Train: test loss: {test_losses[-1]}")
 
         print(f"\n\nTRAINING MODEL {model_idx}\n")
         for i in tqdm(range(-1, epochs), desc="Epoch", position=0, leave=False):
@@ -210,10 +226,10 @@ def train(agent, train_state, train_action, train_next_state, epochs=5, batch_si
                     batch_state, batch_action, batch_next_state = train_state[start:end], train_action[start:end], train_next_state[start:end]
                     train_loss_mean = model.update(batch_state, batch_action, batch_next_state)
 
-            test_loss_mean = validation_loss()
+            evaluate()
             train_losses.append(train_loss_mean)
-            test_losses.append(dcn(test_loss_mean))
-            tqdm.write(f"{i+1}: train loss: {train_loss_mean:.5f} | test loss: {test_loss_mean:.5f}")
+
+            tqdm.write(f"{i+1}: train loss: {train_losses[-1]:.5f} | test loss: {test_losses[-1]:.5f}")
 
     if meta:
         for g in model.optimizer.param_groups:
