@@ -221,11 +221,11 @@ class DataUtils:
 
     def cost_dict(self, state, action, goals, initial_state, robot_goals=False, signed=False):
         dist_bonus_thresh = 0.03
-        dist_penalty_thresh = 0.05
-        big_dist_penalty_thresh = 0.1
-        sep_cost_thresh = 0.4
+        dist_penalty_thresh = 0.1
+        big_dist_penalty_thresh = 0.15
+        sep_cost_thresh = 0.5
         realistic_cost_thresh = 0.14
-        goal_object_robot_angle_thresh_deg = 60.
+        goal_object_robot_angle_thresh_deg = 135.
 
         initial_state, action, goals = as_tensor(initial_state, action, goals)
         state_dim = 3
@@ -290,7 +290,8 @@ class DataUtils:
 
         # object state change
         if self.use_object:
-            object_state_with_init = torch.cat([torch.tile(initial_state[-3:], (*object_state.shape[:2], 1))[..., None, :], object_state], dim=-2)
+            tiled_init_object_state = torch.tile(initial_state[-3:], (*object_state.shape[:-2], 1))[..., None, :]
+            object_state_with_init = torch.cat([tiled_init_object_state, object_state], dim=-2)
             object_xy_delta_cost = -torch.norm(torch.diff(object_state_with_init[..., :-1], dim=-2), dim=-1)
         else:
             object_xy_delta_cost = torch.tensor([0.])
@@ -332,7 +333,7 @@ class DataUtils:
             heading_diff_cost = torch.tensor([0.])
 
         # action magnitude
-        norm_cost = -torch.norm(action, dim=-1)
+        norm_cost = -torch.norm(action, dim=-1)[:, None, :]
 
         # to-object heading
         if self.use_object:
@@ -370,14 +371,14 @@ class DataUtils:
             b = torch.norm(goal_xy - object_xy, dim=-1)
             c = torch.norm(goal_xy - robot_xy, dim=-1)
 
-            goal_object_robot_angle_cost_per_robot = torch.abs(torch.pi - torch.arccos((a**2 + b**2 - c**2) / (2 * a * b + 1e-6)))
-            goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.mean(dim=0)
+            goal_object_robot_angle_cost_per_robot = (torch.pi - torch.arccos((a**2 + b**2 - c**2) / (2 * a * b + 1e-6)))
+            # goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.mean(dim=0)
             # goal_object_robot_angle_cost[dist_cost < 0.03] = 0.
             # goal_object_robot_angle_cost[goal_object_robot_angle_cost < torch.pi / 6.] = 0.
 
-            # max_goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.max(dim=0)[0]
-            # goal_object_robot_angle_cost = torch.zeros_like(max_goal_object_robot_angle_cost, dtype=torch.float)
-            # goal_object_robot_angle_cost[max_goal_object_robot_angle_cost > goal_object_robot_angle_thresh_deg * torch.pi / 180.] = 1.
+            max_goal_object_robot_angle_cost = goal_object_robot_angle_cost_per_robot.max(dim=0)[0]
+            goal_object_robot_angle_cost = torch.zeros_like(max_goal_object_robot_angle_cost, dtype=torch.float)
+            goal_object_robot_angle_cost[max_goal_object_robot_angle_cost > goal_object_robot_angle_thresh_deg * torch.pi / 180.] = 1.
         else:
             goal_object_robot_angle_cost = torch.tensor([0.])
 
@@ -393,7 +394,7 @@ class DataUtils:
         # import time
         # time.sleep(2.)
 
-        dist_cost = dist_cost ** 2
+        # dist_cost = dist_cost ** 2
 
         cost_dict = {
             "distance": dist_cost,
