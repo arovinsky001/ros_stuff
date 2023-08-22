@@ -23,7 +23,11 @@ class DynamicsNetwork(nn.Module):
         self.update_lr = nn.parameter.Parameter(torch.tensor(self.lr))
 
         input_dim = ACTION_DIM * self.n_robots + STATE_DIM * (self.n_robots + self.use_object - 1)
-        output_dim = STATE_DIM * (self.n_robots + self.use_object) * 2
+        output_dim = STATE_DIM * (self.n_robots + self.use_object)
+        if self.dist:
+            self.max_logvar = nn.parameter.Parameter(torch.ones(output_dim) / 2.)
+            self.min_logvar = nn.parameter.Parameter(torch.ones(output_dim) * -10.)
+            output_dim *= 2
 
         # create networks
         assert self.hidden_depth >= 1
@@ -38,7 +42,11 @@ class DynamicsNetwork(nn.Module):
         self.net = nn.Sequential(*layers)
         self.net.apply(initialize_weights)
 
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+        if self.dist:
+            self.optimizer = torch.optim.Adam([*self.net.parameters(), self.max_logvar, self.min_logvar], lr=self.lr)
+        else:
+            self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr)
+
         self.lr_optimizer = torch.optim.Adam([self.update_lr], lr=self.lr)
 
         self.input_mean = 0
@@ -47,7 +55,7 @@ class DynamicsNetwork(nn.Module):
         self.output_mean = 0
         self.output_std = 1
 
-    def forward(self, states, actions, sample=False, return_dist=False, delta=False, params=None):
+    def forward(self, states, actions, sample=False, ret_dist=False, delta=False, params=None, ret_dist_params=False, ret_logvar=False):
         states, actions = as_tensor(states, actions)
 
         if len(states.shape) == 1:
@@ -79,11 +87,21 @@ class DynamicsNetwork(nn.Module):
             outputs = self.net(inputs)
 
         if self.dist:
-            mean, log_std = torch.chunk(outputs, 2, dim=1)
-            std = log_std.exp()
+            mean, logvar = torch.chunk(outputs, 2, dim=1)
+            logvar = self.max_logvar - F.softplus(self.max_logvar - logvar)
+            logvar = self.min_logvar + F.softplus(logvar - self.min_logvar)
+            std = logvar.exp().sqrt()
+
+            if ret_dist_params:
+                if ret_logvar:
+                    return mean, logvar
+                else:
+                    return mean, std
+
             dist = torch.distributions.normal.Normal(mean, std)
-            if return_dist:
+            if ret_dist:
                 return dist
+
             state_deltas_model = dist.rsample() if sample else mean
         else:
             state_deltas_model = outputs
@@ -106,8 +124,9 @@ class DynamicsNetwork(nn.Module):
             state_delta = self.standardize_output(state_delta)
 
         if self.dist:
-            dist = self(state, action, return_dist=True)
+            dist = self(state, action, ret_dist=True)
             loss = -dist.log_prob(state_delta.detach()).mean()
+            loss += 0.01 * (self.max_logvar.mean() - self.min_logvar.mean())
         else:
             pred_state_delta = self(state, action, delta=True)
             loss = F.mse_loss(pred_state_delta, state_delta, reduction='mean')
@@ -151,7 +170,7 @@ class DynamicsNetwork(nn.Module):
             for _ in range(meta_update_steps):
                 # compute prediction and corresponding training loss
                 if self.dist:
-                    dist = self(train_states, train_actions, return_dist=True, params=params)
+                    dist = self(train_states, train_actions, ret_dist=True, params=params)
                     loss = -dist.log_prob(train_state_deltas).mean()
                 else:
                     pred_state_deltas = self(train_states, train_actions, delta=True, params=params)
@@ -163,7 +182,7 @@ class DynamicsNetwork(nn.Module):
 
             # only consider last-step losses for main network update
             if self.dist:
-                test_dist = self(test_states, test_actions, return_dist=True, params=params)
+                test_dist = self(test_states, test_actions, ret_dist=True, params=params)
                 test_loss_sum -= test_dist.log_prob(test_state_deltas).mean()
             else:
                 pred_state_deltas = self(test_states, test_actions, delta=True, params=params)
@@ -199,6 +218,15 @@ class DynamicsNetwork(nn.Module):
 
         self.output_mean = state_delta.mean(dim=0)
         self.output_std = state_delta.std(dim=0)
+
+        if self.n_robots + self.use_object > 1:
+            sin_cos_idx = [2, 3, 6, 7, 10, 11]
+            self.output_mean[sin_cos_idx] = 0.
+            self.output_std[sin_cos_idx] = 1.
+
+            sin_cos_idx = [2, 3, 6, 7]
+            self.input_mean[sin_cos_idx] = 0.
+            self.input_std[sin_cos_idx] = 1.
 
     def standardize_input(self, model_input):
         return (model_input - self.input_mean) / self.input_std
